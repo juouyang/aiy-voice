@@ -1,47 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PCT="${1:-60}"
-if ! [[ "$PCT" =~ ^[0-9]+$ ]]; then
-  echo "Usage: $0 <0-100>" >&2
+PLAY_PCT="${1:-60}"
+MIC_GAIN="${2:-}"
+
+if ! [[ "$PLAY_PCT" =~ ^[0-9]+$ ]]; then
+  echo "Usage: $0 <playback 0-100> [mic_gain]" >&2
   exit 1
 fi
-if [ "$PCT" -lt 0 ] || [ "$PCT" -gt 100 ]; then
-  echo "Volume must be 0-100" >&2
+if [ "$PLAY_PCT" -lt 0 ] || [ "$PLAY_PCT" -gt 100 ]; then
+  echo "Playback must be 0-100" >&2
+  exit 1
+fi
+if [ -n "$MIC_GAIN" ] && ! [[ "$MIC_GAIN" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "mic_gain must be numeric (e.g. 4.5)" >&2
   exit 1
 fi
 
-GAIN=$(python3 - <<PY
-pct=$PCT
+PLAY_GAIN=$(python3 - <<PY
+pct=$PLAY_PCT
 print(f"{pct/100:.2f}")
 PY
 )
 
-cat > "$HOME/.aiy_volume.env" <<EOF
-export AIY_PLAYBACK_GAIN=$GAIN
-EOF
-
-if [ -f "$HOME/aiy_button_record_play.py" ]; then
-  python3 - <<PY
-from pathlib import Path
-import re
-p=Path.home()/"aiy_button_record_play.py"
-s=p.read_text()
-pattern=r'PLAYBACK_GAIN\s*=\s*float\(os\.getenv\("AIY_PLAYBACK_GAIN",\s*"[0-9.]+"\)\)'
-repl='PLAYBACK_GAIN = float(os.getenv("AIY_PLAYBACK_GAIN", "'+"$GAIN"+'"))'
-s2=re.sub(pattern,repl,s)
-if s2!=s:
-    p.write_text(s2)
-    print("Updated aiy_button_record_play.py default gain")
-PY
-fi
+{
+  echo "export AIY_PLAYBACK_GAIN=$PLAY_GAIN"
+  if [ -n "$MIC_GAIN" ]; then
+    echo "export AIY_MIC_GAIN=$MIC_GAIN"
+  fi
+} > "$HOME/.aiy_volume.env"
+chmod 600 "$HOME/.aiy_volume.env"
 
 python3 - <<PY
 import math, struct, wave, subprocess
 sr=48000
 secs=0.20
 freq=660.0
-pct=$PCT
+pct=$PLAY_PCT
 amp=0.12*(pct/100.0)
 n=int(sr*secs)
 path='/tmp/aiy_short_beep.wav'
@@ -55,6 +50,11 @@ with wave.open(path,'wb') as w:
         frames.append(struct.pack('<ii', v, v))
     w.writeframes(b''.join(frames))
 subprocess.run(['aplay','-D','hw:1,0','-q',path], check=False)
-print(f"Volume set to {pct}% (AIY_PLAYBACK_GAIN={pct/100:.2f})")
-print('Played 0.2s test beep')
+print(f"Playback set: {pct}% (AIY_PLAYBACK_GAIN={pct/100:.2f})")
 PY
+
+if [ -n "$MIC_GAIN" ]; then
+  echo "Mic gain set: AIY_MIC_GAIN=$MIC_GAIN"
+else
+  echo "Mic gain unchanged. Pass second arg to set it."
+fi

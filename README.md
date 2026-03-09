@@ -41,7 +41,7 @@
 - `~/aiy-voice/`：專案程式與 README
 - `~/run-local-poc.sh`：硬體驗證入口
 - `~/run-shutdown-guard.sh`：關機守護入口
-- `~/run_aiy_assistant.sh`：相容入口（目前導向本地 PoC）
+- `~/aiy-voice/volume.sh`：調整播放/麥克風增益
 - `~/run-wifi-recover.sh`：Wi-Fi 恢復工具
 
 ## Git 版控
