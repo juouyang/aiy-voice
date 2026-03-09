@@ -14,4 +14,4 @@ cleanup() {
 trap cleanup EXIT
 
 source "$HOME/.aiy_volume.env" 2>/dev/null || true
-"$HOME/.venvs/aiy/bin/python" -u "$HOME/aiy-assistant/aiy_button_record_play.py"
+"$HOME/.venvs/aiy/bin/python" -u "$HOME/aiy-voice/aiy_button_record_play.py"

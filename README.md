@@ -7,7 +7,7 @@
 雲端 OpenAI / STT / TTS 已從目前流程移除，避免 API 成本。
 
 ## 功能 A：本地硬體驗證 PoC
-- 程式：`~/aiy-assistant/aiy_button_record_play.py`
+- 程式：`~/aiy-voice/aiy_button_record_play.py`
 - 啟動：`~/run-local-poc.sh`
 
 操作流程：
@@ -22,7 +22,7 @@
 - PoC 結束後會自動把關機守護服務啟回
 
 ## 功能 B：長按關機保護
-- 程式：`~/aiy-assistant/button_shutdown_guard.py`
+- 程式：`~/aiy-voice/button_shutdown_guard.py`
 - 手動啟動：`~/run-shutdown-guard.sh`
 
 長按行為：
@@ -38,15 +38,15 @@
 - `sudo systemctl disable --now aiy-shutdown-guard.service`
 
 ## 專案結構
-- `~/aiy-assistant/`：專案程式與 README
+- `~/aiy-voice/`：專案程式與 README
 - `~/run-local-poc.sh`：硬體驗證入口
 - `~/run-shutdown-guard.sh`：關機守護入口
 - `~/run_aiy_assistant.sh`：相容入口（目前導向本地 PoC）
 - `~/run-wifi-recover.sh`：Wi-Fi 恢復工具
 
 ## Git 版控
-`~/aiy-assistant` 已初始化為本地 git repo。
+`~/aiy-voice` 已初始化為本地 git repo。
 
 常用：
-- `git -C ~/aiy-assistant status`
-- `git -C ~/aiy-assistant log --oneline -n 5`
+- `git -C ~/aiy-voice status`
+- `git -C ~/aiy-voice log --oneline -n 5`
