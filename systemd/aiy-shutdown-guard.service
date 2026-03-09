@@ -1,0 +1,16 @@
+[Unit]
+Description=AIY button long-press shutdown guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ju
+Group=ju
+WorkingDirectory=/home/ju
+ExecStart=/home/ju/run-shutdown-guard.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
