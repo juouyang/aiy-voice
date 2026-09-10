@@ -15,8 +15,5 @@ logs/*.jsonl
 *.key
 *.pem
 
-# Local backups and private monitoring configuration
+# Local backups
 *.orig
-uptime-kuma-push.sh
-systemd/uptime-kuma-push.service
-systemd/uptime-kuma-push.timer

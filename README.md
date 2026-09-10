@@ -45,7 +45,6 @@
 ## 本機設定與安全
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
-- Uptime Kuma heartbeat 是裝置維運用途，刻意存放在 `~/scripts/uptime-kuma/`，不屬於本專案。
 - 若未來需要設定範例，請建立不含真實值的 `*.example` 檔案。
 
 ## 專案結構
