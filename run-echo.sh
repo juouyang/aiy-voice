@@ -14,5 +14,5 @@ cleanup() {
 trap cleanup EXIT
 
 source "$HOME/.aiy_volume.env" 2>/dev/null || true
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-"$HOME/.venvs/aiy/bin/python" -u "$script_dir/aiy_button_echo.py"
+project_dir="${AIY_PROJECT_DIR:-$HOME/aiy-voice}"
+"$HOME/.venvs/aiy/bin/python" -u "$project_dir/aiy_button_echo.py"

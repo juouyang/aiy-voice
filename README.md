@@ -9,7 +9,7 @@
 ## 功能 A：錄音 Echo
 
 - 程式：`~/aiy-voice/aiy_button_echo.py`
-- 啟動：`~/aiy-voice/run-echo.sh`
+- 啟動：`~/run-echo.sh`
 
 只使用同一顆 AIY 按鈕，短按定義為按下後在 1.2 秒內放開：
 
@@ -49,7 +49,7 @@
 
 ## 專案結構
 - `~/aiy-voice/`：專案程式與 README
-- `~/aiy-voice/run-echo.sh`：錄音 Echo 入口
+- `~/run-echo.sh`：錄音 Echo 入口（來源檔在專案內為 `run-echo.sh`）
 - `~/run-shutdown-guard.sh`：關機守護入口
 - `~/aiy-voice/volume.sh`：調整播放/麥克風增益
 - `~/run-wifi-recover.sh`：Wi-Fi 恢復工具
