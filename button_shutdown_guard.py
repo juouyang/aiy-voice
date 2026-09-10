@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
+import math
 import os
 import subprocess
+import struct
 import time
+import wave
 
 BUTTON_PIN = int(os.getenv("AIY_BUTTON_PIN", "23"))
 LED_PIN = int(os.getenv("AIY_LED_PIN", "25"))
 GPIO_CHIP = os.getenv("AIY_GPIO_CHIP", "gpiochip0")
 WARN_SEC = float(os.getenv("AIY_SHUTDOWN_WARN_SEC", "10.0"))
 SHUTDOWN_SEC = float(os.getenv("AIY_SHUTDOWN_SEC", "12.0"))
+BEEP_DEVICE = os.getenv("AIY_BEEP_DEV", "hw:1,0")
+BEEP_PATH = os.getenv("AIY_BEEP_WAV", "/tmp/aiy_shutdown_guard_beep.wav")
+BEEP_PERCENT = float(os.getenv("AIY_BEEP_PERCENT", "60"))
+SHORT_PRESS_MAX_SEC = float(os.getenv("AIY_SHORT_PRESS_MAX_SEC", "1.0"))
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.05"))
 
 
@@ -54,8 +61,25 @@ def read_button_pressed(chip: str, pin: int) -> bool:
 
 def play_tone(freq: int, dur_sec: float = 0.12) -> None:
     dur = max(0.05, min(dur_sec, 0.60))
+    sample_rate = 48000
+    amplitude = 0.12 * min(max(BEEP_PERCENT, 0.0), 100.0) / 100.0
+    frame_count = int(sample_rate * dur)
+
+    # Match volume.sh's PCM format and send the tone to Voice HAT, not ALSA default.
+    with wave.open(BEEP_PATH, "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(4)
+        wav.setframerate(sample_rate)
+        frames = bytearray()
+        for index in range(frame_count):
+            value = int(
+                2147483647 * amplitude * math.sin(2 * math.pi * freq * index / sample_rate)
+            )
+            frames.extend(struct.pack("<ii", value, value))
+        wav.writeframes(frames)
+
     subprocess.run(
-        ["timeout", f"{dur:.2f}s", "speaker-test", "-q", "-t", "sine", "-f", str(freq)],
+        ["aplay", "-D", BEEP_DEVICE, "-q", BEEP_PATH],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
@@ -73,6 +97,10 @@ def warn_pattern() -> None:
 def cancel_pattern() -> None:
     play_tone(880, 0.09)
     play_tone(660, 0.09)
+
+
+def prompt_pattern() -> None:
+    play_tone(880, 0.12)
 
 
 def shutdown_pattern() -> None:
@@ -124,7 +152,10 @@ def main() -> int:
             elif (not pressed) and last_pressed:
                 if press_started_at is not None:
                     held = now - press_started_at
-                    if warned and held < SHUTDOWN_SEC:
+                    if held <= SHORT_PRESS_MAX_SEC:
+                        print("[prompt] short press")
+                        prompt_pattern()
+                    elif warned and held < SHUTDOWN_SEC:
                         print("[cancel] shutdown cancelled")
                         cancel_pattern()
                         led.set(False)
