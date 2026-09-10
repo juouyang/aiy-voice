@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if command -v systemctl >/dev/null 2>&1; then
-  sudo systemctl stop aiy-shutdown-guard.service >/dev/null 2>&1 || true
+daemon_service="aiy-button-daemon.service"
+daemon_was_active=0
+
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$daemon_service"; then
+  sudo systemctl stop "$daemon_service"
+  daemon_was_active=1
 fi
 
 cleanup() {
-  if command -v systemctl >/dev/null 2>&1; then
-    sudo systemctl start aiy-shutdown-guard.service >/dev/null 2>&1 || true
+  if (( daemon_was_active )); then
+    sudo systemctl start "$daemon_service"
   fi
 }
 

@@ -187,21 +187,29 @@ def process_for_playback(src: Path, dst: Path) -> tuple[str, float, float]:
     return (chosen, peak_pct, auto)
 
 
-def play_echo(play_dev: str, wav_path: Path, led: LedController) -> None:
-    """Play the recorded audio while making the Echo state visible on the LED."""
+def start_echo_playback(play_dev: str, wav_path: Path) -> subprocess.Popen | None:
+    """Start Echo playback so callers may either wait or keep handling button events."""
     print("[echo] playback start")
-    led_on = True
-    led.set(led_on)
     try:
-        player = subprocess.Popen(
+        return subprocess.Popen(
             ["aplay", "-D", play_dev, "-q", str(wav_path)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except OSError as exc:
         print(f"[warn] unable to start playback: {exc}")
+        return None
+
+
+def play_echo(play_dev: str, wav_path: Path, led: LedController) -> None:
+    """Play the recorded audio while making the Echo state visible on the LED."""
+    player = start_echo_playback(play_dev, wav_path)
+    if player is None:
         led.set(False)
         return
+
+    led_on = True
+    led.set(led_on)
 
     try:
         next_toggle_at = time.monotonic() + 0.25

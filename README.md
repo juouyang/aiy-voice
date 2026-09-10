@@ -1,17 +1,16 @@
-# AIY Voice Kit V1 Echo 與關機保護（Raspberry Pi 3B）
+# AIY Voice Kit V1 單一按鈕 daemon（Raspberry Pi 3B）
 
 ## 目前功能
-1. 功能 A：單一按鈕的本機錄音 Echo
-2. 功能 B：長按按鈕安全關機（10 秒警告，12 秒關機）
+單一 `aiy-button-daemon.service` 是唯一常駐且持有 GPIO 的程序，提供：
+
+1. 功能 A：兩次短按的本機錄音 Echo
+2. 功能 B：長按安全關機（10 秒警告，12 秒關機）
 
 雲端 OpenAI / STT / TTS 尚未接入；功能 A 是後續語音助理使用者體驗的第一個完整步驟。
 
-## 功能 A：錄音 Echo
+## 常駐按鈕行為
 
-- 程式：`~/aiy-voice/aiy_button_echo.py`
-- 啟動：`~/run-echo.sh`
-
-只使用同一顆 AIY 按鈕，短按定義為按下後在 1.2 秒內放開：
+短按定義為按下後在 1.2 秒內放開：
 
 | 狀態 | 使用者動作 | 裝置回饋 | 結果 |
 | --- | --- | --- | --- |
@@ -20,27 +19,28 @@
 | 錄音中 | 說話 | LED 持續常亮 | 持續錄音 |
 | 停止並 Echo | 第二次短按 | 下行提示音，LED 閃爍 | 停止錄音並回放剛才的內容 |
 | 回到待命 | 回放結束 | LED 熄滅 | 可開始下一輪 |
+| 安全關機 | 任一狀態長按 10 秒 | 警告提示音 | 放開可取消；持續按到 12 秒即關機 |
 
-備註：
+長按在錄音或 Echo 回放中具有優先權：daemon 會中止目前工作、進入關機警告。這個設計讓兩種功能共用一顆按鈕，但從不由兩個程序同時操作 GPIO。
 
-- `run-echo.sh` 會暫停關機守護服務，避免兩個程序同時取得 GPIO；結束 Echo 程式後會自動重新啟用守護服務。
-- 因此 Echo 程式運行期間，長按不會觸發關機；請以 `Ctrl-C` 結束 Echo，回到待命的關機保護模式。
+## 唯一 systemd 服務
 
-## 功能 B：長按關機保護
-- 程式：`~/aiy-voice/button_shutdown_guard.py`
-- 手動啟動：`~/run-shutdown-guard.sh`
-
-長按行為：
-- 按住 10 秒：警告提示音（放開可取消）
-- 持續按到 12 秒：執行 `sudo /sbin/shutdown -h now`
-
-## 自動啟動（開機後生效）
-已建立 systemd 服務：`aiy-shutdown-guard.service`
+開機後啟動的唯一服務是 `aiy-button-daemon.service`。
 
 常用指令：
-- `sudo systemctl status aiy-shutdown-guard.service`
-- `sudo systemctl restart aiy-shutdown-guard.service`
-- `sudo systemctl disable --now aiy-shutdown-guard.service`
+
+- `sudo systemctl status aiy-button-daemon.service`
+- `sudo systemctl restart aiy-button-daemon.service`
+- `sudo systemctl disable --now aiy-button-daemon.service`
+
+## 手動單獨測試
+
+以下啟動器會先暫停 `aiy-button-daemon.service`，離開程式後再恢復它；因此手動測試期間同樣只有一個程序取得 GPIO。
+
+- 功能 A Echo：`~/run-echo.sh`
+- 功能 B 長按關機：`~/run-shutdown-guard.sh`
+
+測試功能 B 時，10 秒會播放警告音；若只想確認警告，請在 12 秒前放開按鈕以取消關機。
 
 ## 本機設定與安全
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
@@ -49,8 +49,11 @@
 
 ## 專案結構
 - `~/aiy-voice/`：專案程式與 README
-- `~/run-echo.sh`：錄音 Echo 入口（來源檔在專案內為 `run-echo.sh`）
-- `~/run-shutdown-guard.sh`：關機守護入口
+- `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
+- `~/run-button-daemon.sh`：systemd 使用的 daemon 啟動器
+- `~/run-echo.sh`：功能 A 手動測試入口
+- `~/run-shutdown-guard.sh`：功能 B 手動測試入口
+- `~/aiy-voice/systemd/aiy-button-daemon.service`：唯一 systemd unit
 - `~/aiy-voice/volume.sh`：調整播放/麥克風增益
 - `~/run-wifi-recover.sh`：Wi-Fi 恢復工具
 

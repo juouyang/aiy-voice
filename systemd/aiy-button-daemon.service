@@ -1,5 +1,5 @@
 [Unit]
-Description=AIY button long-press shutdown guard
+Description=AIY unified button Echo and shutdown daemon
 After=network-online.target
 Wants=network-online.target
 
@@ -7,8 +7,8 @@ Wants=network-online.target
 Type=simple
 User=ju
 Group=ju
-WorkingDirectory=/home/ju
-ExecStart=/home/ju/run-shutdown-guard.sh
+WorkingDirectory=/home/ju/aiy-voice
+ExecStart=/home/ju/run-button-daemon.sh
 Restart=always
 RestartSec=2
 
