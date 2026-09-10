@@ -169,6 +169,43 @@ def process_for_playback(src: Path, dst: Path) -> tuple[str, float, float]:
     return (chosen, peak_pct, auto)
 
 
+def play_echo(play_dev: str, wav_path: Path, led: LedController) -> None:
+    """Play the recorded audio while making the Echo state visible on the LED."""
+    print("[echo] playback start")
+    led_on = True
+    led.set(led_on)
+    try:
+        player = subprocess.Popen(
+            ["aplay", "-D", play_dev, "-q", str(wav_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(f"[warn] unable to start playback: {exc}")
+        led.set(False)
+        return
+
+    try:
+        next_toggle_at = time.monotonic() + 0.25
+        while player.poll() is None:
+            now = time.monotonic()
+            if now >= next_toggle_at:
+                led_on = not led_on
+                led.set(led_on)
+                next_toggle_at = now + 0.25
+            time.sleep(0.02)
+    finally:
+        if player.poll() is None:
+            player.terminate()
+            try:
+                player.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                player.kill()
+        led.set(False)
+
+    print("[echo] playback done")
+
+
 def main() -> int:
     subprocess.run(["pkill", "-f", f"^gpioset -c {GPIO_CHIP}"], check=False)
 
@@ -176,7 +213,7 @@ def main() -> int:
     cap_dev = os.getenv("AIY_CAP_DEV", f"hw:{card},0")
     play_dev = os.getenv("AIY_PLAY_DEV", f"plughw:{card},0")
 
-    print("AIY minimal button audio test")
+    print("AIY button recording Echo")
     print(f"- Button: {GPIO_CHIP}:{BUTTON_PIN} (active-low)")
     print(f"- LED:    {GPIO_CHIP}:{LED_PIN}")
     print(f"- Capture device: {cap_dev}")
@@ -185,7 +222,7 @@ def main() -> int:
     print(f"- Mic gain: {MIC_GAIN:.2f}")
     print(f"- Playback gain: {PLAYBACK_GAIN:.2f}")
     print(
-        "Tap once to start recording, tap again to stop and playback. Ctrl+C to exit."
+        "Short-press once to record; short-press again to Echo playback. Ctrl+C to exit."
     )
 
     led = LedController(GPIO_CHIP, LED_PIN)
@@ -237,7 +274,6 @@ def main() -> int:
                         recorder = None
                         recording = False
                         beep_stop(play_dev)
-                        led.set(False)
 
                         if WAV_PATH.exists() and WAV_PATH.stat().st_size > 44:
                             ch, peak_pct, auto = process_for_playback(
@@ -246,14 +282,10 @@ def main() -> int:
                             print(
                                 f"[proc] channel={ch} input_peak={peak_pct * 100:.2f}% auto_gain={auto:.2f}x"
                             )
-                            print("[play] start")
-                            subprocess.run(
-                                ["aplay", "-D", play_dev, "-q", str(PLAY_WAV_PATH)],
-                                check=False,
-                            )
-                            print("[play] done")
+                            play_echo(play_dev, PLAY_WAV_PATH, led)
                         else:
                             print("[warn] no valid audio recorded")
+                            led.set(False)
 
             last_pressed = pressed
             time.sleep(POLL_SEC)

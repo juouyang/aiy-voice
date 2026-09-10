@@ -1,25 +1,30 @@
-# AIY Voice Kit V1 硬體驗證與關機保護（Raspberry Pi 3B）
+# AIY Voice Kit V1 Echo 與關機保護（Raspberry Pi 3B）
 
-## 目前只保留兩個功能
-1. 硬體驗證 PoC（按鈕 / LED / 麥克風 / 喇叭）
-2. 長按按鈕安全關機（10 秒警告，12 秒關機）
+## 目前功能
+1. 功能 A：單一按鈕的本機錄音 Echo
+2. 功能 B：長按按鈕安全關機（10 秒警告，12 秒關機）
 
-雲端 OpenAI / STT / TTS 已從目前流程移除，避免 API 成本。
+雲端 OpenAI / STT / TTS 尚未接入；功能 A 是後續語音助理使用者體驗的第一個完整步驟。
 
-## 功能 A：本地硬體驗證 PoC
-- 程式：`~/aiy-voice/aiy_button_record_play.py`
-- 啟動：`~/run-local-poc.sh`
+## 功能 A：錄音 Echo
 
-操作流程：
-1. 按一下按鈕再放開
-2. LED 亮 + 提示音，開始錄音
-3. 使用者說話
-4. 再按一下按鈕再放開
-5. LED 滅 + 提示音，停止錄音並回放
+- 程式：`~/aiy-voice/aiy_button_echo.py`
+- 啟動：`~/aiy-voice/run-echo.sh`
+
+只使用同一顆 AIY 按鈕，短按定義為按下後在 1.2 秒內放開：
+
+| 狀態 | 使用者動作 | 裝置回饋 | 結果 |
+| --- | --- | --- | --- |
+| 待命 | — | LED 熄滅 | 等待第一次短按 |
+| 開始錄音 | 第一次短按 | LED 常亮、上行提示音 | 開始收音 |
+| 錄音中 | 說話 | LED 持續常亮 | 持續錄音 |
+| 停止並 Echo | 第二次短按 | 下行提示音，LED 閃爍 | 停止錄音並回放剛才的內容 |
+| 回到待命 | 回放結束 | LED 熄滅 | 可開始下一輪 |
 
 備註：
-- `run-local-poc.sh` 會先暫停關機守護服務，避免同時搶 GPIO
-- PoC 結束後會自動把關機守護服務啟回
+
+- `run-echo.sh` 會暫停關機守護服務，避免兩個程序同時取得 GPIO；結束 Echo 程式後會自動重新啟用守護服務。
+- 因此 Echo 程式運行期間，長按不會觸發關機；請以 `Ctrl-C` 結束 Echo，回到待命的關機保護模式。
 
 ## 功能 B：長按關機保護
 - 程式：`~/aiy-voice/button_shutdown_guard.py`
@@ -45,7 +50,7 @@
 
 ## 專案結構
 - `~/aiy-voice/`：專案程式與 README
-- `~/run-local-poc.sh`：硬體驗證入口
+- `~/aiy-voice/run-echo.sh`：錄音 Echo 入口
 - `~/run-shutdown-guard.sh`：關機守護入口
 - `~/aiy-voice/volume.sh`：調整播放/麥克風增益
 - `~/run-wifi-recover.sh`：Wi-Fi 恢復工具
