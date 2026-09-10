@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import os
 import re
 import signal
@@ -20,6 +21,9 @@ MIC_GAIN = float(os.getenv("AIY_MIC_GAIN", "6.00"))
 PLAYBACK_GAIN = float(os.getenv("AIY_PLAYBACK_GAIN", "0.60"))
 TARGET_PEAK = float(os.getenv("AIY_TARGET_PEAK", "0.65"))
 MAX_AUTO_GAIN = float(os.getenv("AIY_MAX_AUTO_GAIN", "12.0"))
+BEEP_DEVICE = os.getenv("AIY_BEEP_DEV", "hw:1,0")
+BEEP_PATH = os.getenv("AIY_BEEP_WAV", "/tmp/aiy_echo_beep.wav")
+BEEP_PERCENT = float(os.getenv("AIY_BEEP_PERCENT", "60"))
 SHORT_PRESS_MAX_SEC = float(os.getenv("AIY_SHORT_PRESS_MAX_SEC", "1.2"))
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.02"))
 
@@ -92,20 +96,34 @@ def stop_recorder(proc: subprocess.Popen | None) -> None:
                 proc.kill()
 
 
-def play_tone(play_dev: str, freq: int, dur_sec: float = 0.10) -> None:
-    dur = max(0.05, min(dur_sec, 0.50))
+def play_tone(freq: int, dur_sec: float = 0.10) -> None:
+    dur = max(0.05, min(dur_sec, 0.60))
+    sample_rate = 48000
+    amplitude = 0.12 * min(max(BEEP_PERCENT, 0.0), 100.0) / 100.0
+    frame_count = int(sample_rate * dur)
+
+    # Match the verified shutdown-guard tone format and target the Voice HAT.
+    with wave.open(BEEP_PATH, "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(4)
+        wav.setframerate(sample_rate)
+        frames = bytearray()
+        for index in range(frame_count):
+            value = int(
+                2147483647
+                * amplitude
+                * math.sin(2 * math.pi * freq * index / sample_rate)
+            )
+            frames.extend(struct.pack("<ii", value, value))
+        wav.writeframes(frames)
+
     subprocess.run(
         [
-            "timeout",
-            f"{dur:.2f}s",
-            "speaker-test",
+            "aplay",
             "-D",
-            play_dev,
+            BEEP_DEVICE,
             "-q",
-            "-t",
-            "sine",
-            "-f",
-            str(freq),
+            BEEP_PATH,
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -113,14 +131,14 @@ def play_tone(play_dev: str, freq: int, dur_sec: float = 0.10) -> None:
     )
 
 
-def beep_start(play_dev: str) -> None:
-    play_tone(play_dev, 740, 0.08)
-    play_tone(play_dev, 1040, 0.08)
+def beep_start() -> None:
+    play_tone(740, 0.08)
+    play_tone(1040, 0.08)
 
 
-def beep_stop(play_dev: str) -> None:
-    play_tone(play_dev, 1040, 0.08)
-    play_tone(play_dev, 740, 0.08)
+def beep_stop() -> None:
+    play_tone(1040, 0.08)
+    play_tone(740, 0.08)
 
 
 def process_for_playback(src: Path, dst: Path) -> tuple[str, float, float]:
@@ -250,7 +268,7 @@ def main() -> int:
                         if WAV_PATH.exists():
                             WAV_PATH.unlink()
                         print("[rec] start")
-                        beep_start(play_dev)
+                        beep_start()
                         led.set(True)
                         recorder = subprocess.Popen(
                             [
@@ -273,7 +291,7 @@ def main() -> int:
                         stop_recorder(recorder)
                         recorder = None
                         recording = False
-                        beep_stop(play_dev)
+                        beep_stop()
 
                         if WAV_PATH.exists() and WAV_PATH.stat().st_size > 44:
                             ch, peak_pct, auto = process_for_playback(
