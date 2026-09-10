@@ -4,3 +4,19 @@ logs/*.log
 logs/*.jsonl
 *.wav
 *.tmp
+
+# Per-device settings and credentials
+.env
+.env.*
+*.env
+*.local
+*.local.*
+.aiy_volume.env
+*.key
+*.pem
+
+# Local backups and private monitoring configuration
+*.orig
+uptime-kuma-push.sh
+systemd/uptime-kuma-push.service
+systemd/uptime-kuma-push.timer
