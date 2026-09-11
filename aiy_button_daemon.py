@@ -147,9 +147,11 @@ def run_voice_loop(
             raise RuntimeError(config_error)
 
         request_body, content_type = encode_transcription_request(wav_path)
+        print("[voice] ASR request started")
         transcription = json.loads(
             post_omlx("/v1/audio/transcriptions", request_body, content_type)
         )
+        print("[voice] ASR response received")
         transcript = str(transcription.get("text", "")).strip()
         if not transcript:
             raise RuntimeError("ASR returned no text")
@@ -167,7 +169,9 @@ def run_voice_loop(
             },
             ensure_ascii=False,
         ).encode()
+        print("[voice] TTS request started")
         audio = post_omlx("/v1/audio/speech", tts_request, "application/json")
+        print("[voice] TTS response received")
         if len(audio) <= 44 or audio[:4] != b"RIFF":
             raise RuntimeError("TTS did not return a WAV file")
 
@@ -206,6 +210,7 @@ def main() -> int:
     print(f"- Button: {GPIO_CHIP}:{BUTTON_PIN} (active-low)")
     print(f"- LED:    {GPIO_CHIP}:{LED_PIN}")
     print("- Short press: record, replay, then network voice confirmation")
+    print(f"- Network request timeout: {OMLX_TIMEOUT_SEC:.0f}s")
     print(f"- Shutdown warning: {WARN_SEC:.1f}s")
     print(f"- Shutdown: {SHUTDOWN_SEC:.1f}s")
 
@@ -397,7 +402,7 @@ def main() -> int:
                             network_error = None
                             try:
                                 start_voice_loop(job_id, PLAY_WAV_PATH, results)
-                                print("[voice] ASR and TTS request started")
+                                print("[voice] network voice confirmation started")
                             except OSError as exc:
                                 network_pending = False
                                 network_error = f"could not start voice request: {exc}"
