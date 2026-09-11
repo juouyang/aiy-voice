@@ -395,6 +395,13 @@ def main() -> int:
                             job_id += 1
                             network_pending = True
                             network_error = None
+                            # Start local playback before copying the WAV for
+                            # the network worker, so Echo stays immediate.
+                            player = start_echo_playback(play_dev, PLAY_WAV_PATH)
+                            if player is not None:
+                                player_kind = "recording"
+                            else:
+                                print("[warn] original playback could not start")
                             try:
                                 start_voice_loop(job_id, PLAY_WAV_PATH, results)
                                 print("[voice] ASR and TTS request started")
@@ -402,11 +409,6 @@ def main() -> int:
                                 network_pending = False
                                 network_error = f"could not start voice request: {exc}"
                                 print(f"[voice] request failed: {network_error}")
-                            player = start_echo_playback(play_dev, PLAY_WAV_PATH)
-                            if player is not None:
-                                player_kind = "recording"
-                            else:
-                                print("[warn] original playback could not start")
                         else:
                             print("[warn] no valid audio recorded")
                             led.set(False)
