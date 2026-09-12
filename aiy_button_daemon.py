@@ -46,9 +46,14 @@ from button_shutdown_guard import (
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.02"))
 ECHO_LED_FLASH_SEC = float(os.getenv("AIY_ECHO_LED_FLASH_SEC", "0.25"))
 SECONDARY_HOLD_MIN_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MIN_SEC", "1.5"))
-SECONDARY_HOLD_MAX_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MAX_SEC", "3.0"))
 SECONDARY_CONFIRM_SEC = float(os.getenv("AIY_SECONDARY_CONFIRM_SEC", "1.0"))
 SECONDARY_FLASH_SEC = float(os.getenv("AIY_SECONDARY_FLASH_SEC", "0.10"))
+SECONDARY_RELEASE_PROMPT_PATH = Path(
+    os.getenv(
+        "AIY_SECONDARY_RELEASE_PROMPT_WAV",
+        str(Path.home() / ".cache" / "aiy-voice" / "secondary-release-prompt.wav"),
+    )
+)
 OMLX_BASE_URL = os.getenv("OMLX_BASE_URL", "").rstrip("/")
 OMLX_API_KEY = os.getenv("OMLX_API_KEY", "")
 OMLX_TIMEOUT_SEC = float(os.getenv("AIY_OMLX_TIMEOUT_SEC", "30"))
@@ -80,6 +85,25 @@ def secondary_confirm_pattern() -> None:
     """Acknowledge an auxiliary gesture until it receives a real action."""
     play_tone(880, 0.07)
     play_tone(1040, 0.07)
+
+
+def start_secondary_release_prompt(play_dev: str) -> subprocess.Popen | None:
+    """Play the cached TTS release cue, with a local-tone fallback."""
+    try:
+        prompt_is_ready = (
+            SECONDARY_RELEASE_PROMPT_PATH.is_file()
+            and SECONDARY_RELEASE_PROMPT_PATH.stat().st_size > 44
+        )
+    except OSError:
+        prompt_is_ready = False
+
+    if prompt_is_ready:
+        print("[button] auxiliary gesture ready; playing release prompt")
+        return start_echo_playback(play_dev, SECONDARY_RELEASE_PROMPT_PATH)
+
+    print("[warn] release prompt is unavailable; using tone fallback")
+    secondary_prompt_pattern()
+    return None
 
 
 def stop_player(player: subprocess.Popen | None) -> None:
@@ -224,7 +248,7 @@ def main() -> int:
     print(f"- LED:    {GPIO_CHIP}:{LED_PIN}")
     print("- Short press: record, replay, then network voice confirmation")
     print(
-        f"- Auxiliary gesture: hold {SECONDARY_HOLD_MIN_SEC:.1f}-{SECONDARY_HOLD_MAX_SEC:.1f}s, then short-press within {SECONDARY_CONFIRM_SEC:.1f}s"
+        f"- Auxiliary gesture: release after the {SECONDARY_HOLD_MIN_SEC:.1f}s prompt, then short-press within {SECONDARY_CONFIRM_SEC:.1f}s"
     )
     print(f"- Shutdown warning: {WARN_SEC:.1f}s")
     print(f"- Shutdown: {SHUTDOWN_SEC:.1f}s")
@@ -234,6 +258,7 @@ def main() -> int:
     player = None
     player_kind = None
     tts_playback_path = None
+    release_prompt_player = None
     recording = False
     press_started_at = None
     warned = False
@@ -250,6 +275,7 @@ def main() -> int:
     secondary_flash_edges_remaining = 0
     secondary_next_flash_at = None
     secondary_wait_led_set = False
+    secondary_hold_ready = False
 
     def clear_finished_voice_loop() -> None:
         delete_file(WAV_PATH)
@@ -374,6 +400,10 @@ def main() -> int:
                     led_on = True
                     led.set(led_on)
                     secondary_wait_led_set = True
+            elif secondary_hold_ready:
+                if not led_on:
+                    led_on = True
+                    led.set(led_on)
             else:
                 blinking = bool(player or network_pending or tts_reply_path)
                 if blinking:
@@ -396,9 +426,26 @@ def main() -> int:
                 press_started_at = now
                 warned = False
                 shutdown_requested = False
+                secondary_hold_ready = False
 
             elif pressed and press_started_at is not None:
                 held = now - press_started_at
+                if (
+                    held >= SECONDARY_HOLD_MIN_SEC
+                    and not secondary_hold_ready
+                    and not secondary_pending
+                    and not warned
+                    and not recording
+                    and player is None
+                    and not network_pending
+                    and tts_reply_path is None
+                    and not network_error
+                ):
+                    secondary_hold_ready = True
+                    led_on = True
+                    led.set(led_on)
+                    release_prompt_player = start_secondary_release_prompt(play_dev)
+
                 if held >= WARN_SEC and not warned:
                     if recording:
                         print("[rec] interrupted by shutdown request")
@@ -414,6 +461,9 @@ def main() -> int:
                     tts_playback_path = None
                     invalidate_voice_loop()
                     clear_secondary_wait()
+                    secondary_hold_ready = False
+                    stop_player(release_prompt_player)
+                    release_prompt_player = None
                     clear_finished_voice_loop()
 
                     warned = True
@@ -444,6 +494,12 @@ def main() -> int:
                         secondary_confirm_pattern()
                     else:
                         print("[button] auxiliary gesture confirmation ignored")
+
+                elif not warned and secondary_hold_ready:
+                    stop_player(release_prompt_player)
+                    release_prompt_player = None
+                    secondary_hold_ready = False
+                    start_secondary_wait()
 
                 elif held <= SHORT_PRESS_MAX_SEC and not warned:
                     if player or network_pending or tts_reply_path or network_error:
@@ -505,17 +561,6 @@ def main() -> int:
                             print("[warn] no valid audio recorded")
                             led.set(False)
 
-                elif (
-                    not warned
-                    and SECONDARY_HOLD_MIN_SEC <= held <= SECONDARY_HOLD_MAX_SEC
-                    and not recording
-                    and player is None
-                    and not network_pending
-                    and tts_reply_path is None
-                    and not network_error
-                ):
-                    start_secondary_wait()
-
                 elif warned and held < SHUTDOWN_SEC:
                     print("[cancel] shutdown cancelled")
                     cancel_pattern()
@@ -527,6 +572,7 @@ def main() -> int:
                 press_started_at = None
                 warned = False
                 shutdown_requested = False
+                secondary_hold_ready = False
 
             last_pressed = pressed
             time.sleep(POLL_SEC)
@@ -536,6 +582,7 @@ def main() -> int:
     finally:
         stop_recorder(recorder)
         stop_player(player)
+        stop_player(release_prompt_player)
         delete_file(tts_reply_path)
         delete_file(tts_playback_path)
         led.close()
