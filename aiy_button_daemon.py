@@ -43,6 +43,7 @@ from button_shutdown_guard import (
     warn_pattern,
 )
 
+PROJECT_DIR = Path(__file__).resolve().parent
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.02"))
 ECHO_LED_FLASH_SEC = float(os.getenv("AIY_ECHO_LED_FLASH_SEC", "0.25"))
 SECONDARY_HOLD_MIN_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MIN_SEC", "1.5"))
@@ -51,7 +52,7 @@ SECONDARY_FLASH_SEC = float(os.getenv("AIY_SECONDARY_FLASH_SEC", "0.10"))
 SECONDARY_RELEASE_PROMPT_PATH = Path(
     os.getenv(
         "AIY_SECONDARY_RELEASE_PROMPT_WAV",
-        str(Path.home() / ".cache" / "aiy-voice" / "secondary-release-prompt.wav"),
+        str(PROJECT_DIR / "assets" / "secondary-release-prompt.wav"),
     )
 )
 OMLX_BASE_URL = os.getenv("OMLX_BASE_URL", "").rstrip("/")

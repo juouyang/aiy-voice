@@ -53,7 +53,7 @@
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。
-- 輔助手勢的 TTS 提示音快取於 `~/.cache/aiy-voice/secondary-release-prompt.wav`，僅存本機且不可提交；若檔案不存在，daemon 會以提示音代替。
+- 輔助手勢的預先生成 TTS 提示音為 `assets/secondary-release-prompt.wav`，隨專案版本追蹤；若檔案不存在，daemon 會以提示音代替。
 - 若未來需要設定範例，請建立不含真實值的 `*.example` 檔案。
 
 ## 專案結構
