@@ -37,6 +37,7 @@ from button_shutdown_guard import (
     SHUTDOWN_SEC,
     WARN_SEC,
     cancel_pattern,
+    play_tone,
     read_button_pressed,
     shutdown_pattern,
     warn_pattern,
@@ -44,6 +45,10 @@ from button_shutdown_guard import (
 
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.02"))
 ECHO_LED_FLASH_SEC = float(os.getenv("AIY_ECHO_LED_FLASH_SEC", "0.25"))
+SECONDARY_HOLD_MIN_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MIN_SEC", "1.5"))
+SECONDARY_HOLD_MAX_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MAX_SEC", "3.0"))
+SECONDARY_CONFIRM_SEC = float(os.getenv("AIY_SECONDARY_CONFIRM_SEC", "1.0"))
+SECONDARY_FLASH_SEC = float(os.getenv("AIY_SECONDARY_FLASH_SEC", "0.10"))
 OMLX_BASE_URL = os.getenv("OMLX_BASE_URL", "").rstrip("/")
 OMLX_API_KEY = os.getenv("OMLX_API_KEY", "")
 OMLX_TIMEOUT_SEC = float(os.getenv("AIY_OMLX_TIMEOUT_SEC", "30"))
@@ -63,6 +68,18 @@ class VoiceLoopResult:
     job_id: int
     reply_path: Path | None = None
     error: str | None = None
+
+
+def secondary_prompt_pattern() -> None:
+    """Signal that one short press may confirm the auxiliary gesture."""
+    play_tone(660, 0.07)
+    play_tone(880, 0.07)
+
+
+def secondary_confirm_pattern() -> None:
+    """Acknowledge an auxiliary gesture until it receives a real action."""
+    play_tone(880, 0.07)
+    play_tone(1040, 0.07)
 
 
 def stop_player(player: subprocess.Popen | None) -> None:
@@ -206,6 +223,9 @@ def main() -> int:
     print(f"- Button: {GPIO_CHIP}:{BUTTON_PIN} (active-low)")
     print(f"- LED:    {GPIO_CHIP}:{LED_PIN}")
     print("- Short press: record, replay, then network voice confirmation")
+    print(
+        f"- Auxiliary gesture: hold {SECONDARY_HOLD_MIN_SEC:.1f}-{SECONDARY_HOLD_MAX_SEC:.1f}s, then short-press within {SECONDARY_CONFIRM_SEC:.1f}s"
+    )
     print(f"- Shutdown warning: {WARN_SEC:.1f}s")
     print(f"- Shutdown: {SHUTDOWN_SEC:.1f}s")
 
@@ -225,6 +245,11 @@ def main() -> int:
     network_pending = False
     tts_reply_path = None
     network_error = None
+    secondary_pending = False
+    secondary_deadline = None
+    secondary_flash_edges_remaining = 0
+    secondary_next_flash_at = None
+    secondary_wait_led_set = False
 
     def clear_finished_voice_loop() -> None:
         delete_file(WAV_PATH)
@@ -237,6 +262,31 @@ def main() -> int:
         delete_file(tts_reply_path)
         tts_reply_path = None
         network_error = None
+
+    def start_secondary_wait() -> None:
+        nonlocal secondary_pending, secondary_deadline
+        nonlocal secondary_flash_edges_remaining, secondary_next_flash_at
+        nonlocal secondary_wait_led_set, led_on
+        secondary_pending = True
+        secondary_wait_led_set = False
+        led_on = False
+        led.set(False)
+        print("[button] auxiliary gesture armed; short-press to confirm")
+        secondary_prompt_pattern()
+        armed_at = time.monotonic()
+        secondary_deadline = armed_at + SECONDARY_CONFIRM_SEC
+        secondary_flash_edges_remaining = 4
+        secondary_next_flash_at = armed_at
+
+    def clear_secondary_wait() -> None:
+        nonlocal secondary_pending, secondary_deadline
+        nonlocal secondary_flash_edges_remaining, secondary_next_flash_at
+        nonlocal secondary_wait_led_set
+        secondary_pending = False
+        secondary_deadline = None
+        secondary_flash_edges_remaining = 0
+        secondary_next_flash_at = None
+        secondary_wait_led_set = False
 
     def start_tts_playback() -> None:
         nonlocal player, player_kind, tts_reply_path, tts_playback_path
@@ -298,20 +348,47 @@ def main() -> int:
                 network_error = None
                 clear_finished_voice_loop()
 
-            blinking = bool(player or network_pending or tts_reply_path)
-            if blinking:
-                if next_led_toggle_at is None:
-                    led_on = True
-                    led.set(led_on)
-                    next_led_toggle_at = now + ECHO_LED_FLASH_SEC
-                elif now >= next_led_toggle_at:
+            if (
+                secondary_pending
+                and secondary_deadline is not None
+                and now >= secondary_deadline
+                and not last_pressed
+            ):
+                print("[button] auxiliary gesture expired")
+                clear_secondary_wait()
+
+            if secondary_pending:
+                if (
+                    secondary_flash_edges_remaining > 0
+                    and secondary_next_flash_at is not None
+                    and now >= secondary_next_flash_at
+                ):
                     led_on = not led_on
                     led.set(led_on)
-                    next_led_toggle_at = now + ECHO_LED_FLASH_SEC
+                    secondary_flash_edges_remaining -= 1
+                    secondary_next_flash_at = now + SECONDARY_FLASH_SEC
+                elif (
+                    secondary_flash_edges_remaining == 0
+                    and not secondary_wait_led_set
+                ):
+                    led_on = True
+                    led.set(led_on)
+                    secondary_wait_led_set = True
             else:
-                next_led_toggle_at = None
-                if not recording and not warned:
-                    led.set(False)
+                blinking = bool(player or network_pending or tts_reply_path)
+                if blinking:
+                    if next_led_toggle_at is None:
+                        led_on = True
+                        led.set(led_on)
+                        next_led_toggle_at = now + ECHO_LED_FLASH_SEC
+                    elif now >= next_led_toggle_at:
+                        led_on = not led_on
+                        led.set(led_on)
+                        next_led_toggle_at = now + ECHO_LED_FLASH_SEC
+                else:
+                    next_led_toggle_at = None
+                    if not recording and not warned:
+                        led.set(False)
 
             pressed = read_button_pressed(GPIO_CHIP, BUTTON_PIN)
 
@@ -336,6 +413,7 @@ def main() -> int:
                     delete_file(tts_playback_path)
                     tts_playback_path = None
                     invalidate_voice_loop()
+                    clear_secondary_wait()
                     clear_finished_voice_loop()
 
                     warned = True
@@ -353,7 +431,21 @@ def main() -> int:
             elif not pressed and last_pressed:
                 held = (now - press_started_at) if press_started_at is not None else 0.0
 
-                if held <= SHORT_PRESS_MAX_SEC and not warned:
+                if secondary_pending:
+                    if (
+                        held <= SHORT_PRESS_MAX_SEC
+                        and press_started_at is not None
+                        and secondary_deadline is not None
+                        and press_started_at <= secondary_deadline
+                    ):
+                        clear_secondary_wait()
+                        led.set(False)
+                        print("[button] auxiliary gesture triggered")
+                        secondary_confirm_pattern()
+                    else:
+                        print("[button] auxiliary gesture confirmation ignored")
+
+                elif held <= SHORT_PRESS_MAX_SEC and not warned:
                     if player or network_pending or tts_reply_path or network_error:
                         print("[button] short press ignored while voice confirmation is active")
                     elif not recording:
@@ -412,6 +504,17 @@ def main() -> int:
                         else:
                             print("[warn] no valid audio recorded")
                             led.set(False)
+
+                elif (
+                    not warned
+                    and SECONDARY_HOLD_MIN_SEC <= held <= SECONDARY_HOLD_MAX_SEC
+                    and not recording
+                    and player is None
+                    and not network_pending
+                    and tts_reply_path is None
+                    and not network_error
+                ):
+                    start_secondary_wait()
 
                 elif warned and held < SHUTDOWN_SEC:
                     print("[cancel] shutdown cancelled")
