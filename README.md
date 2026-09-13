@@ -54,6 +54,7 @@
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。
 - 輔助手勢的預先生成 TTS 提示音為 `assets/secondary-release-prompt.wav`，隨專案版本追蹤；若檔案不存在，daemon 會以提示音代替。
+- 待測的音量提示資產位於 `assets/volume-{quiet,normal,loud}.wav`：安靜為 0.35×、標準為 0.65×、大聲為目前 TTS 的 1.00× 基準。它們尚未接入按鈕事件。
 - 若未來需要設定範例，請建立不含真實值的 `*.example` 檔案。
 
 ## 專案結構
