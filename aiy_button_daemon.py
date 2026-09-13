@@ -30,6 +30,7 @@ from aiy_button_echo import (
     beep_stop,
     detect_card,
     process_for_playback,
+    scale_wav_for_playback,
     start_echo_playback,
     stop_recorder,
 )
@@ -79,16 +80,16 @@ class VoiceLoopResult:
     error: str | None = None
 
 
-def secondary_prompt_pattern() -> None:
+def secondary_prompt_pattern(output_gain: float = 1.0) -> None:
     """Signal that one short press may confirm the auxiliary gesture."""
-    play_tone(660, 0.07)
-    play_tone(880, 0.07)
+    play_tone(660, 0.07, output_gain)
+    play_tone(880, 0.07, output_gain)
 
 
-def secondary_confirm_pattern() -> None:
+def secondary_confirm_pattern(output_gain: float = 1.0) -> None:
     """Acknowledge an auxiliary gesture until it receives a real action."""
-    play_tone(880, 0.07)
-    play_tone(1040, 0.07)
+    play_tone(880, 0.07, output_gain)
+    play_tone(1040, 0.07, output_gain)
 
 
 def fixed_prompt_path(profile: str, filename: str) -> Path:
@@ -171,7 +172,7 @@ def start_secondary_release_prompt(
         return start_echo_playback(play_dev, prompt_path)
 
     print("[warn] release prompt is unavailable; using tone fallback")
-    secondary_prompt_pattern()
+    secondary_prompt_pattern(OUTPUT_VOLUME_GAINS[profile])
     return None
 
 
@@ -188,7 +189,7 @@ def start_volume_announcement(
         return start_echo_playback(play_dev, prompt_path)
 
     print("[warn] volume announcement is unavailable; using tone fallback")
-    secondary_confirm_pattern()
+    secondary_confirm_pattern(OUTPUT_VOLUME_GAINS[profile])
     return None
 
 
@@ -397,7 +398,7 @@ def main() -> int:
         led_on = False
         led.set(False)
         print("[button] auxiliary gesture armed; short-press to confirm")
-        secondary_prompt_pattern()
+        secondary_prompt_pattern(OUTPUT_VOLUME_GAINS[output_volume_profile])
         armed_at = time.monotonic()
         secondary_armed_at = armed_at
         secondary_deadline = armed_at + SECONDARY_CONFIRM_SEC
@@ -422,8 +423,22 @@ def main() -> int:
         nonlocal player, player_kind, tts_reply_path, tts_playback_path
         if tts_reply_path is None:
             return
-        tts_playback_path = tts_reply_path
+        source_path = tts_reply_path
         tts_reply_path = None
+        output_gain = OUTPUT_VOLUME_GAINS[output_volume_profile]
+        if output_gain == 1.0:
+            tts_playback_path = source_path
+        else:
+            scaled_path = source_path.with_name(f"{source_path.stem}-output.wav")
+            try:
+                scale_wav_for_playback(source_path, scaled_path, output_gain)
+            except Exception as exc:
+                print(f"[warn] could not scale TTS output; playing original: {exc}")
+                delete_file(scaled_path)
+                tts_playback_path = source_path
+            else:
+                delete_file(source_path)
+                tts_playback_path = scaled_path
         print("[tts] playback start")
         player = start_echo_playback(play_dev, tts_playback_path)
         if player is not None:
@@ -502,7 +517,7 @@ def main() -> int:
 
             if player is None and network_error and not network_pending and not recording:
                 print("[voice] returning to standby after failed request")
-                cancel_pattern()
+                cancel_pattern(OUTPUT_VOLUME_GAINS[output_volume_profile])
                 network_error = None
                 clear_finished_voice_loop()
 
@@ -606,13 +621,13 @@ def main() -> int:
 
                     warned = True
                     print("[warn] long-press detected, shutdown soon")
-                    warn_pattern()
+                    warn_pattern(OUTPUT_VOLUME_GAINS[output_volume_profile])
                     led.set(True)
 
                 if held >= SHUTDOWN_SEC and warned and not shutdown_requested:
                     shutdown_requested = True
                     print("[shutdown] executing safe shutdown")
-                    shutdown_pattern()
+                    shutdown_pattern(OUTPUT_VOLUME_GAINS[output_volume_profile])
                     subprocess.run(["sudo", "/sbin/shutdown", "-h", "now"], check=False)
                     return 0
 
@@ -668,7 +683,7 @@ def main() -> int:
                         delete_file(WAV_PATH)
                         delete_file(PLAY_WAV_PATH)
                         print("[rec] start")
-                        beep_start()
+                        beep_start(OUTPUT_VOLUME_GAINS[output_volume_profile])
                         led.set(True)
                         recorder = subprocess.Popen(
                             [
@@ -691,11 +706,13 @@ def main() -> int:
                         stop_recorder(recorder)
                         recorder = None
                         recording = False
-                        beep_stop()
+                        beep_stop(OUTPUT_VOLUME_GAINS[output_volume_profile])
 
                         if WAV_PATH.exists() and WAV_PATH.stat().st_size > 44:
                             channel, peak_pct, auto = process_for_playback(
-                                WAV_PATH, PLAY_WAV_PATH
+                                WAV_PATH,
+                                PLAY_WAV_PATH,
+                                OUTPUT_VOLUME_GAINS[output_volume_profile],
                             )
                             print(
                                 f"[proc] channel={channel} input_peak={peak_pct * 100:.2f}% auto_gain={auto:.2f}x"
@@ -723,7 +740,7 @@ def main() -> int:
 
                 elif warned and held < SHUTDOWN_SEC:
                     print("[cancel] shutdown cancelled")
-                    cancel_pattern()
+                    cancel_pattern(OUTPUT_VOLUME_GAINS[output_volume_profile])
                     led.set(False)
 
                 elif not recording and not player:

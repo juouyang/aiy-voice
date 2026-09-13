@@ -59,10 +59,15 @@ def read_button_pressed(chip: str, pin: int) -> bool:
         return False
 
 
-def play_tone(freq: int, dur_sec: float = 0.12) -> None:
+def play_tone(freq: int, dur_sec: float = 0.12, output_gain: float = 1.0) -> None:
     dur = max(0.05, min(dur_sec, 0.60))
     sample_rate = 48000
-    amplitude = 0.12 * min(max(BEEP_PERCENT, 0.0), 100.0) / 100.0
+    amplitude = (
+        0.12
+        * min(max(BEEP_PERCENT, 0.0), 100.0)
+        / 100.0
+        * max(output_gain, 0.0)
+    )
     frame_count = int(sample_rate * dur)
 
     # Match volume.sh's PCM format and send the tone to Voice HAT, not ALSA default.
@@ -86,26 +91,26 @@ def play_tone(freq: int, dur_sec: float = 0.12) -> None:
     )
 
 
-def warn_pattern() -> None:
-    play_tone(520, 0.15)
+def warn_pattern(output_gain: float = 1.0) -> None:
+    play_tone(520, 0.15, output_gain)
     time.sleep(0.07)
-    play_tone(520, 0.15)
+    play_tone(520, 0.15, output_gain)
     time.sleep(0.07)
-    play_tone(360, 0.35)
+    play_tone(360, 0.35, output_gain)
 
 
-def cancel_pattern() -> None:
-    play_tone(880, 0.09)
-    play_tone(660, 0.09)
+def cancel_pattern(output_gain: float = 1.0) -> None:
+    play_tone(880, 0.09, output_gain)
+    play_tone(660, 0.09, output_gain)
 
 
-def prompt_pattern() -> None:
-    play_tone(880, 0.12)
+def prompt_pattern(output_gain: float = 1.0) -> None:
+    play_tone(880, 0.12, output_gain)
 
 
-def shutdown_pattern() -> None:
-    play_tone(300, 0.25)
-    play_tone(220, 0.35)
+def shutdown_pattern(output_gain: float = 1.0) -> None:
+    play_tone(300, 0.25, output_gain)
+    play_tone(220, 0.35, output_gain)
 
 
 def main() -> int:

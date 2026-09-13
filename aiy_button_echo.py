@@ -96,10 +96,15 @@ def stop_recorder(proc: subprocess.Popen | None) -> None:
                 proc.kill()
 
 
-def play_tone(freq: int, dur_sec: float = 0.10) -> None:
+def play_tone(freq: int, dur_sec: float = 0.10, output_gain: float = 1.0) -> None:
     dur = max(0.05, min(dur_sec, 0.60))
     sample_rate = 48000
-    amplitude = 0.12 * min(max(BEEP_PERCENT, 0.0), 100.0) / 100.0
+    amplitude = (
+        0.12
+        * min(max(BEEP_PERCENT, 0.0), 100.0)
+        / 100.0
+        * max(output_gain, 0.0)
+    )
     frame_count = int(sample_rate * dur)
 
     # Match the verified shutdown-guard tone format and target the Voice HAT.
@@ -131,17 +136,19 @@ def play_tone(freq: int, dur_sec: float = 0.10) -> None:
     )
 
 
-def beep_start() -> None:
-    play_tone(740, 0.08)
-    play_tone(1040, 0.08)
+def beep_start(output_gain: float = 1.0) -> None:
+    play_tone(740, 0.08, output_gain)
+    play_tone(1040, 0.08, output_gain)
 
 
-def beep_stop() -> None:
-    play_tone(1040, 0.08)
-    play_tone(740, 0.08)
+def beep_stop(output_gain: float = 1.0) -> None:
+    play_tone(1040, 0.08, output_gain)
+    play_tone(740, 0.08, output_gain)
 
 
-def process_for_playback(src: Path, dst: Path) -> tuple[str, float, float]:
+def process_for_playback(
+    src: Path, dst: Path, output_gain: float = 1.0
+) -> tuple[str, float, float]:
     with wave.open(str(src), "rb") as r:
         params = r.getparams()
         if params.sampwidth != 4:
@@ -166,7 +173,7 @@ def process_for_playback(src: Path, dst: Path) -> tuple[str, float, float]:
     peak_pct = peak / 2147483647.0
     auto = TARGET_PEAK / peak_pct if peak_pct > 0 else 1.0
     auto = min(max(auto, 1.0), MAX_AUTO_GAIN)
-    total_gain = MIC_GAIN * PLAYBACK_GAIN * auto
+    total_gain = MIC_GAIN * PLAYBACK_GAIN * auto * max(output_gain, 0.0)
 
     scaled = []
     for v in mono:
@@ -185,6 +192,54 @@ def process_for_playback(src: Path, dst: Path) -> tuple[str, float, float]:
         w.writeframes(stereo)
 
     return (chosen, peak_pct, auto)
+
+
+def scale_wav_for_playback(src: Path, dst: Path, output_gain: float) -> None:
+    """Create a PCM WAV with output gain applied, preserving its format."""
+    with wave.open(str(src), "rb") as reader:
+        params = reader.getparams()
+        if params.comptype != "NONE":
+            raise ValueError("only uncompressed PCM WAV files are supported")
+        frames = reader.readframes(params.nframes)
+
+    gain = max(output_gain, 0.0)
+    sample_width = params.sampwidth
+    if sample_width == 1:
+        scaled = bytes(
+            max(0, min(255, int((sample - 128) * gain + 128)))
+            for sample in frames
+        )
+    elif sample_width == 2:
+        samples = struct.unpack("<" + "h" * (len(frames) // 2), frames)
+        scaled = struct.pack(
+            "<" + "h" * len(samples),
+            *(
+                max(-32768, min(32767, int(sample * gain)))
+                for sample in samples
+            ),
+        )
+    elif sample_width == 3:
+        scaled_bytes = bytearray()
+        for offset in range(0, len(frames), 3):
+            sample = int.from_bytes(frames[offset : offset + 3], "little", signed=True)
+            scaled_sample = max(-8388608, min(8388607, int(sample * gain)))
+            scaled_bytes.extend(scaled_sample.to_bytes(3, "little", signed=True))
+        scaled = bytes(scaled_bytes)
+    elif sample_width == 4:
+        samples = struct.unpack("<" + "i" * (len(frames) // 4), frames)
+        scaled = struct.pack(
+            "<" + "i" * len(samples),
+            *(
+                max(-2147483648, min(2147483647, int(sample * gain)))
+                for sample in samples
+            ),
+        )
+    else:
+        raise ValueError(f"unsupported PCM sample width: {sample_width}")
+
+    with wave.open(str(dst), "wb") as writer:
+        writer.setparams(params)
+        writer.writeframes(scaled)
 
 
 def start_echo_playback(play_dev: str, wav_path: Path) -> subprocess.Popen | None:
