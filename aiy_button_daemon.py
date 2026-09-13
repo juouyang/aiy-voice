@@ -366,6 +366,8 @@ def main() -> int:
     secondary_next_flash_at = None
     secondary_wait_led_set = False
     secondary_hold_ready = False
+    secondary_release_pending = False
+    secondary_armed_at = None
     output_volume_profile = load_output_volume_profile()
     print(
         f"- Current auxiliary volume: {output_volume_profile} "
@@ -387,7 +389,7 @@ def main() -> int:
     def start_secondary_wait() -> None:
         nonlocal secondary_pending, secondary_deadline
         nonlocal secondary_flash_edges_remaining, secondary_next_flash_at
-        nonlocal secondary_wait_led_set, led_on
+        nonlocal secondary_wait_led_set, secondary_armed_at, led_on
         secondary_pending = True
         secondary_wait_led_set = False
         led_on = False
@@ -395,6 +397,7 @@ def main() -> int:
         print("[button] auxiliary gesture armed; short-press to confirm")
         secondary_prompt_pattern()
         armed_at = time.monotonic()
+        secondary_armed_at = armed_at
         secondary_deadline = armed_at + SECONDARY_CONFIRM_SEC
         secondary_flash_edges_remaining = 4
         secondary_next_flash_at = armed_at
@@ -402,9 +405,10 @@ def main() -> int:
     def clear_secondary_wait() -> None:
         nonlocal secondary_pending, secondary_deadline
         nonlocal secondary_flash_edges_remaining, secondary_next_flash_at
-        nonlocal secondary_wait_led_set
+        nonlocal secondary_wait_led_set, secondary_armed_at
         secondary_pending = False
         secondary_deadline = None
+        secondary_armed_at = None
         secondary_flash_edges_remaining = 0
         secondary_next_flash_at = None
         secondary_wait_led_set = False
@@ -447,6 +451,15 @@ def main() -> int:
                     network_pending = False
                     tts_reply_path = result.reply_path
                     print("[voice] TTS response ready")
+
+            if (
+                release_prompt_player is not None
+                and release_prompt_player.poll() is not None
+            ):
+                release_prompt_player = None
+                if secondary_release_pending:
+                    secondary_release_pending = False
+                    start_secondary_wait()
 
             if player and player.poll() is not None:
                 finished_kind = player_kind
@@ -497,7 +510,7 @@ def main() -> int:
                     led_on = True
                     led.set(led_on)
                     secondary_wait_led_set = True
-            elif secondary_hold_ready:
+            elif secondary_hold_ready or secondary_release_pending:
                 if not led_on:
                     led_on = True
                     led.set(led_on)
@@ -531,6 +544,7 @@ def main() -> int:
                     held >= SECONDARY_HOLD_MIN_SEC
                     and not secondary_hold_ready
                     and not secondary_pending
+                    and not secondary_release_pending
                     and not warned
                     and not recording
                     and player is None
@@ -561,6 +575,7 @@ def main() -> int:
                     invalidate_voice_loop()
                     clear_secondary_wait()
                     secondary_hold_ready = False
+                    secondary_release_pending = False
                     stop_player(release_prompt_player)
                     release_prompt_player = None
                     clear_finished_voice_loop()
@@ -584,7 +599,9 @@ def main() -> int:
                     if (
                         held <= SHORT_PRESS_MAX_SEC
                         and press_started_at is not None
+                        and secondary_armed_at is not None
                         and secondary_deadline is not None
+                        and press_started_at >= secondary_armed_at
                         and press_started_at <= secondary_deadline
                     ):
                         clear_secondary_wait()
@@ -606,10 +623,22 @@ def main() -> int:
                         print("[button] auxiliary gesture confirmation ignored")
 
                 elif not warned and secondary_hold_ready:
-                    stop_player(release_prompt_player)
-                    release_prompt_player = None
                     secondary_hold_ready = False
-                    start_secondary_wait()
+                    if (
+                        release_prompt_player is not None
+                        and release_prompt_player.poll() is None
+                    ):
+                        secondary_release_pending = True
+                        print(
+                            "[button] auxiliary release received; "
+                            "waiting for release prompt to finish"
+                        )
+                    else:
+                        release_prompt_player = None
+                        start_secondary_wait()
+
+                elif secondary_release_pending:
+                    print("[button] press ignored while release prompt is playing")
 
                 elif held <= SHORT_PRESS_MAX_SEC and not warned:
                     if player or network_pending or tts_reply_path or network_error:
