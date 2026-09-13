@@ -368,6 +368,8 @@ def main() -> int:
     secondary_hold_ready = False
     secondary_release_pending = False
     secondary_armed_at = None
+    secondary_released_at = None
+    secondary_confirmation_queued = False
     output_volume_profile = load_output_volume_profile()
     print(
         f"- Current auxiliary volume: {output_volume_profile} "
@@ -406,9 +408,12 @@ def main() -> int:
         nonlocal secondary_pending, secondary_deadline
         nonlocal secondary_flash_edges_remaining, secondary_next_flash_at
         nonlocal secondary_wait_led_set, secondary_armed_at
+        nonlocal secondary_released_at, secondary_confirmation_queued
         secondary_pending = False
         secondary_deadline = None
         secondary_armed_at = None
+        secondary_released_at = None
+        secondary_confirmation_queued = False
         secondary_flash_edges_remaining = 0
         secondary_next_flash_at = None
         secondary_wait_led_set = False
@@ -427,6 +432,20 @@ def main() -> int:
             print("[warn] TTS playback could not start")
             delete_file(tts_playback_path)
             tts_playback_path = None
+
+    def trigger_auxiliary_volume() -> None:
+        nonlocal output_volume_profile, player, player_kind
+        clear_secondary_wait()
+        led.set(False)
+        output_volume_profile = next_output_volume_profile(output_volume_profile)
+        try:
+            save_output_volume_profile(output_volume_profile)
+        except OSError as exc:
+            print(f"[warn] could not save output volume setting: {exc}")
+        print("[button] auxiliary volume gesture triggered")
+        player = start_volume_announcement(play_dev, output_volume_profile)
+        if player is not None:
+            player_kind = "volume"
 
     try:
         led.set(False)
@@ -460,6 +479,9 @@ def main() -> int:
                 if secondary_release_pending:
                     secondary_release_pending = False
                     start_secondary_wait()
+                    if secondary_confirmation_queued:
+                        print("[button] using queued auxiliary confirmation")
+                        trigger_auxiliary_volume()
 
             if player and player.poll() is not None:
                 finished_kind = player_kind
@@ -576,6 +598,8 @@ def main() -> int:
                     clear_secondary_wait()
                     secondary_hold_ready = False
                     secondary_release_pending = False
+                    secondary_released_at = None
+                    secondary_confirmation_queued = False
                     stop_player(release_prompt_player)
                     release_prompt_player = None
                     clear_finished_voice_loop()
@@ -599,31 +623,19 @@ def main() -> int:
                     if (
                         held <= SHORT_PRESS_MAX_SEC
                         and press_started_at is not None
-                        and secondary_armed_at is not None
+                        and secondary_released_at is not None
                         and secondary_deadline is not None
-                        and press_started_at >= secondary_armed_at
+                        and press_started_at >= secondary_released_at
                         and press_started_at <= secondary_deadline
                     ):
-                        clear_secondary_wait()
-                        led.set(False)
-                        output_volume_profile = next_output_volume_profile(
-                            output_volume_profile
-                        )
-                        try:
-                            save_output_volume_profile(output_volume_profile)
-                        except OSError as exc:
-                            print(f"[warn] could not save output volume setting: {exc}")
-                        print("[button] auxiliary volume gesture triggered")
-                        player = start_volume_announcement(
-                            play_dev, output_volume_profile
-                        )
-                        if player is not None:
-                            player_kind = "volume"
+                        trigger_auxiliary_volume()
                     else:
                         print("[button] auxiliary gesture confirmation ignored")
 
                 elif not warned and secondary_hold_ready:
                     secondary_hold_ready = False
+                    secondary_released_at = now
+                    secondary_confirmation_queued = False
                     if (
                         release_prompt_player is not None
                         and release_prompt_player.poll() is None
@@ -638,7 +650,16 @@ def main() -> int:
                         start_secondary_wait()
 
                 elif secondary_release_pending:
-                    print("[button] press ignored while release prompt is playing")
+                    if (
+                        held <= SHORT_PRESS_MAX_SEC
+                        and press_started_at is not None
+                        and secondary_released_at is not None
+                        and press_started_at >= secondary_released_at
+                    ):
+                        secondary_confirmation_queued = True
+                        print("[button] auxiliary confirmation queued")
+                    else:
+                        print("[button] auxiliary gesture confirmation ignored")
 
                 elif held <= SHORT_PRESS_MAX_SEC and not warned:
                     if player or network_pending or tts_reply_path or network_error:
