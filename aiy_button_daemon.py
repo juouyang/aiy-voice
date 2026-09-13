@@ -49,12 +49,15 @@ ECHO_LED_FLASH_SEC = float(os.getenv("AIY_ECHO_LED_FLASH_SEC", "0.25"))
 SECONDARY_HOLD_MIN_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MIN_SEC", "1.5"))
 SECONDARY_CONFIRM_SEC = float(os.getenv("AIY_SECONDARY_CONFIRM_SEC", "1.0"))
 SECONDARY_FLASH_SEC = float(os.getenv("AIY_SECONDARY_FLASH_SEC", "0.10"))
-SECONDARY_RELEASE_PROMPT_PATH = Path(
+SECONDARY_RELEASE_PROMPT_OVERRIDE = os.getenv("AIY_SECONDARY_RELEASE_PROMPT_WAV")
+OUTPUT_VOLUME_CONFIG_PATH = Path(
     os.getenv(
-        "AIY_SECONDARY_RELEASE_PROMPT_WAV",
-        str(PROJECT_DIR / "assets" / "secondary-release-prompt.wav"),
+        "AIY_OUTPUT_VOLUME_CONFIG",
+        str(Path.home() / ".config" / "aiy-voice" / "output-volume.env"),
     )
 )
+OUTPUT_VOLUME_PROFILES = ("quiet", "normal", "loud")
+OUTPUT_VOLUME_GAINS = {"quiet": 0.35, "normal": 0.65, "loud": 1.00}
 OMLX_BASE_URL = os.getenv("OMLX_BASE_URL", "").rstrip("/")
 OMLX_API_KEY = os.getenv("OMLX_API_KEY", "")
 OMLX_TIMEOUT_SEC = float(os.getenv("AIY_OMLX_TIMEOUT_SEC", "30"))
@@ -88,22 +91,104 @@ def secondary_confirm_pattern() -> None:
     play_tone(1040, 0.07)
 
 
-def start_secondary_release_prompt(play_dev: str) -> subprocess.Popen | None:
-    """Play the cached TTS release cue, with a local-tone fallback."""
-    try:
-        prompt_is_ready = (
-            SECONDARY_RELEASE_PROMPT_PATH.is_file()
-            and SECONDARY_RELEASE_PROMPT_PATH.stat().st_size > 44
-        )
-    except OSError:
-        prompt_is_ready = False
+def fixed_prompt_path(profile: str, filename: str) -> Path:
+    return PROJECT_DIR / "assets" / "gain" / profile / filename
 
-    if prompt_is_ready:
-        print("[button] auxiliary gesture ready; playing release prompt")
-        return start_echo_playback(play_dev, SECONDARY_RELEASE_PROMPT_PATH)
+
+def is_valid_wav(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 44
+    except OSError:
+        return False
+
+
+def load_output_volume_profile() -> str:
+    """Load the device-local fixed-prompt volume profile."""
+    try:
+        for line in OUTPUT_VOLUME_CONFIG_PATH.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if key == "AIY_OUTPUT_VOLUME_PROFILE" and separator:
+                profile = value.strip()
+                if profile in OUTPUT_VOLUME_PROFILES:
+                    return profile
+                print(
+                    f"[warn] ignoring invalid output volume profile in "
+                    f"{OUTPUT_VOLUME_CONFIG_PATH}"
+                )
+                break
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[warn] could not read output volume setting: {exc}")
+
+    # "loud" is the previous, unscaled TTS cue volume, preserving the
+    # verified behavior on the first deployment of this feature.
+    return "loud"
+
+
+def save_output_volume_profile(profile: str) -> None:
+    """Atomically save the selected profile without keeping it in Git."""
+    if profile not in OUTPUT_VOLUME_PROFILES:
+        raise ValueError(f"unknown output volume profile: {profile}")
+
+    OUTPUT_VOLUME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = OUTPUT_VOLUME_CONFIG_PATH.with_name(
+        f".{OUTPUT_VOLUME_CONFIG_PATH.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary_path.write_text(
+            f"AIY_OUTPUT_VOLUME_PROFILE={profile}\n", encoding="utf-8"
+        )
+        temporary_path.chmod(0o600)
+        temporary_path.replace(OUTPUT_VOLUME_CONFIG_PATH)
+    finally:
+        delete_file(temporary_path)
+
+
+def next_output_volume_profile(profile: str) -> str:
+    try:
+        profile_index = OUTPUT_VOLUME_PROFILES.index(profile)
+    except ValueError:
+        return "loud"
+    return OUTPUT_VOLUME_PROFILES[(profile_index + 1) % len(OUTPUT_VOLUME_PROFILES)]
+
+
+def start_secondary_release_prompt(
+    play_dev: str, profile: str
+) -> subprocess.Popen | None:
+    """Play the cached TTS release cue, with a local-tone fallback."""
+    prompt_path = (
+        Path(SECONDARY_RELEASE_PROMPT_OVERRIDE)
+        if SECONDARY_RELEASE_PROMPT_OVERRIDE
+        else fixed_prompt_path(profile, "secondary-release-prompt.wav")
+    )
+
+    if is_valid_wav(prompt_path):
+        print(
+            "[button] auxiliary gesture ready; "
+            f"playing {profile} release prompt"
+        )
+        return start_echo_playback(play_dev, prompt_path)
 
     print("[warn] release prompt is unavailable; using tone fallback")
     secondary_prompt_pattern()
+    return None
+
+
+def start_volume_announcement(
+    play_dev: str, profile: str
+) -> subprocess.Popen | None:
+    """Play the matching pre-rendered announcement for the selected profile."""
+    prompt_path = fixed_prompt_path(profile, f"volume-{profile}.wav")
+    if is_valid_wav(prompt_path):
+        print(
+            f"[volume] selected {profile} "
+            f"({OUTPUT_VOLUME_GAINS[profile]:.2f}x); playing announcement"
+        )
+        return start_echo_playback(play_dev, prompt_path)
+
+    print("[warn] volume announcement is unavailable; using tone fallback")
+    secondary_confirm_pattern()
     return None
 
 
@@ -251,6 +336,10 @@ def main() -> int:
     print(
         f"- Auxiliary gesture: release after the {SECONDARY_HOLD_MIN_SEC:.1f}s prompt, then short-press within {SECONDARY_CONFIRM_SEC:.1f}s"
     )
+    print(
+        "- Auxiliary volume: "
+        "quiet 0.35x, normal 0.65x, loud 1.00x (fixed prompt WAVs only)"
+    )
     print(f"- Shutdown warning: {WARN_SEC:.1f}s")
     print(f"- Shutdown: {SHUTDOWN_SEC:.1f}s")
 
@@ -277,6 +366,11 @@ def main() -> int:
     secondary_next_flash_at = None
     secondary_wait_led_set = False
     secondary_hold_ready = False
+    output_volume_profile = load_output_volume_profile()
+    print(
+        f"- Current auxiliary volume: {output_volume_profile} "
+        f"({OUTPUT_VOLUME_GAINS[output_volume_profile]:.2f}x)"
+    )
 
     def clear_finished_voice_loop() -> None:
         delete_file(WAV_PATH)
@@ -365,6 +459,8 @@ def main() -> int:
                     delete_file(tts_playback_path)
                     tts_playback_path = None
                     clear_finished_voice_loop()
+                elif finished_kind == "volume":
+                    print("[volume] announcement done")
 
             if player is None and tts_reply_path is not None and not recording:
                 start_tts_playback()
@@ -445,7 +541,9 @@ def main() -> int:
                     secondary_hold_ready = True
                     led_on = True
                     led.set(led_on)
-                    release_prompt_player = start_secondary_release_prompt(play_dev)
+                    release_prompt_player = start_secondary_release_prompt(
+                        play_dev, output_volume_profile
+                    )
 
                 if held >= WARN_SEC and not warned:
                     if recording:
@@ -491,8 +589,19 @@ def main() -> int:
                     ):
                         clear_secondary_wait()
                         led.set(False)
-                        print("[button] auxiliary gesture triggered")
-                        secondary_confirm_pattern()
+                        output_volume_profile = next_output_volume_profile(
+                            output_volume_profile
+                        )
+                        try:
+                            save_output_volume_profile(output_volume_profile)
+                        except OSError as exc:
+                            print(f"[warn] could not save output volume setting: {exc}")
+                        print("[button] auxiliary volume gesture triggered")
+                        player = start_volume_announcement(
+                            play_dev, output_volume_profile
+                        )
+                        if player is not None:
+                            player_kind = "volume"
                     else:
                         print("[button] auxiliary gesture confirmation ignored")
 
