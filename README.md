@@ -55,7 +55,7 @@
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。
 - 輔助手勢的預先生成 TTS 提示音為 `assets/secondary-release-prompt.wav`，隨專案版本追蹤；若檔案不存在，daemon 會以提示音代替。
 - 待測的音量提示資產位於 `assets/volume-{quiet,normal,loud}.wav`。三者都是未縮放的原始 TTS；未來由 daemon 的輸出 gain 套用安靜 0.35×、標準 0.65×、大聲 1.00×。它們尚未接入按鈕事件。
-- 每份固定語音也已預先建立於 `assets/gain/{quiet,normal,loud}/`；它們可直接播放，無須在裝置上重新計算 gain。Echo 不使用這些檔案或 gain。
+- `assets/gain/{quiet,normal,loud}/` 保留三份「現在可放開」的固定 gain 版本；音量提示只保留與其名稱相符的一份（安靜／標準／大聲），可直接播放而無須在裝置上重新計算 gain。Echo 不使用這些檔案或 gain。
 - 若未來需要設定範例，請建立不含真實值的 `*.example` 檔案。
 
 ## 專案結構
