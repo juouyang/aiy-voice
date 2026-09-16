@@ -8,5 +8,11 @@ if test -r "$omlx_env_file"; then
   source "$omlx_env_file"
   set +a
 fi
+ntfy_env_file="${AIY_NTFY_ENV_FILE:-$HOME/.config/aiy-voice/ntfy.env}"
+if test -r "$ntfy_env_file"; then
+  set -a
+  source "$ntfy_env_file"
+  set +a
+fi
 project_dir="${AIY_PROJECT_DIR:-$HOME/aiy-voice}"
 exec "$HOME/.venvs/aiy/bin/python" -u "$project_dir/aiy_button_daemon.py"

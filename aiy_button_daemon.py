@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -71,6 +72,9 @@ OMLX_TTS_VOICE = os.getenv("AIY_OMLX_TTS_VOICE", "Uncle_Fu")
 OMLX_TTS_LANGUAGE = os.getenv("AIY_OMLX_TTS_LANGUAGE", "Chinese")
 OMLX_TTS_INSTRUCTIONS = os.getenv("AIY_OMLX_TTS_INSTRUCTIONS", "越清楚越好。")
 OMLX_TTS_PREFIX = os.getenv("AIY_OMLX_TTS_PREFIX", "你剛剛說：")
+NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "").rstrip("/")
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
+NTFY_TIMEOUT_SEC = float(os.getenv("AIY_NTFY_TIMEOUT_SEC", "5"))
 
 
 @dataclass(frozen=True)
@@ -237,6 +241,44 @@ def post_omlx(path: str, body: bytes, content_type: str) -> bytes:
         raise RuntimeError(f"{path} is unreachable: {exc.reason}") from exc
 
 
+def publish_ntfy_transcript(transcript: str) -> None:
+    """Best-effort ASR transcript notification that never affects voice flow."""
+    if not NTFY_BASE_URL or not NTFY_TOPIC:
+        print("[ntfy] notification skipped: NTFY_BASE_URL or NTFY_TOPIC is missing")
+        return
+
+    try:
+        request = urllib.request.Request(
+            f"{NTFY_BASE_URL}/{urllib.parse.quote(NTFY_TOPIC, safe='')}",
+            data=transcript.encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "text/plain; charset=utf-8",
+                "Title": "AIY Voice",
+                "Tags": "microphone",
+                "Priority": "default",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=NTFY_TIMEOUT_SEC) as response:
+            response.read()
+        print("[ntfy] ASR transcript notification sent")
+    except Exception as exc:
+        print(f"[ntfy] notification failed (ignored): {exc}")
+
+
+def start_ntfy_transcript_notification(job_id: int, transcript: str) -> None:
+    """Dispatch ntfy work separately so TTS never waits for it."""
+    try:
+        threading.Thread(
+            target=publish_ntfy_transcript,
+            args=(transcript,),
+            name=f"aiy-ntfy-{job_id}",
+            daemon=True,
+        ).start()
+    except RuntimeError as exc:
+        print(f"[ntfy] notification could not start (ignored): {exc}")
+
+
 def encode_transcription_request(wav_path: Path) -> tuple[bytes, str]:
     if wav_path.stat().st_size > OMLX_MAX_UPLOAD_BYTES:
         raise RuntimeError("recording exceeds the configured upload limit")
@@ -281,6 +323,8 @@ def run_voice_loop(
         transcript = str(transcription.get("text", "")).strip()
         if not transcript:
             raise RuntimeError("ASR returned no text")
+
+        start_ntfy_transcript_notification(job_id, transcript)
 
         tts_input = f"{OMLX_TTS_PREFIX}{transcript}" if OMLX_TTS_PREFIX else transcript
         tts_request = json.dumps(
