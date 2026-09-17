@@ -58,7 +58,7 @@
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。
 - 若存在 `~/.config/aiy-voice/openai.env`，daemon 會讀取 `OPENAI_API_KEY` 與可選的 `OPENAI_MODEL`（預設 `gpt-5.4-mini`）。每次只傳送 ASR 文字，不傳送 WAV；請求設為 `store: false`、不保留對話歷史、`reasoning: none`，輸入最多 600 個字元，並硬性限制輸出最多 120 tokens 與 120 個字元。實際每輪 input/output token 用量只寫入本機 service log，不含內容。
-- 若存在 `~/.config/aiy-voice/ntfy.env`，daemon 會使用其中的 `NTFY_BASE_URL` 與 `NTFY_TOPIC`，在 ASR 成功後背景傳送辨識文字。通知不使用 token，失敗只記錄 log，絕不延遲或中斷 Echo／TTS。
+- 若存在 `~/.config/aiy-voice/ntfy.env`，daemon 會使用其中的 `NTFY_BASE_URL` 與 `NTFY_TOPIC`，在 OpenAI 回覆後背景傳送同一則「你說：ASR 文字／AI：回覆」通知。通知不使用 token，失敗只記錄 log，絕不延遲或中斷 Echo／TTS；若 OpenAI 失敗，則只傳 ASR 文字。
 - 輔助手勢的預先生成 TTS 提示音及音量公告存放於 `assets/gain/{quiet,normal,loud}/`，隨專案版本追蹤。各目錄的固定 gain 分別為安靜 0.35×、標準 0.65×、大聲 1.00×，因此裝置播放時不必重新計算。
 - 選取的輸出音量只寫入裝置本機的 `~/.config/aiy-voice/output-volume.env`，並在 daemon 重啟後保留；首次安裝預設為大聲，與原先已驗證的音量相同。
 - 音量 profile 套用於固定提示音、錄音 Echo 回放、Mac TTS 回應、一般 beep 與關機提示。動態 WAV 會在 `/tmp` 建立一次縮放版本並在播放後清除。

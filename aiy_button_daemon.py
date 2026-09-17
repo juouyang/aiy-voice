@@ -362,8 +362,16 @@ def create_openai_reply(transcript: str) -> tuple[str, dict]:
     return reply, usage if isinstance(usage, dict) else {}
 
 
-def publish_ntfy_transcript(transcript: str) -> None:
-    """Best-effort ASR transcript notification that never affects voice flow."""
+def format_ntfy_voice_message(transcript: str, ai_reply: str | None) -> str:
+    """Keep the user's words and the assistant's reply together for review."""
+    message = f"你說：{transcript}"
+    if ai_reply:
+        message += f"\n\nAI：{ai_reply}"
+    return message
+
+
+def publish_ntfy_voice_message(transcript: str, ai_reply: str | None) -> None:
+    """Best-effort voice notification that never affects the playback flow."""
     if not NTFY_BASE_URL or not NTFY_TOPIC:
         print("[ntfy] notification skipped: NTFY_BASE_URL or NTFY_TOPIC is missing")
         return
@@ -371,7 +379,7 @@ def publish_ntfy_transcript(transcript: str) -> None:
     try:
         request = urllib.request.Request(
             f"{NTFY_BASE_URL}/{urllib.parse.quote(NTFY_TOPIC, safe='')}",
-            data=transcript.encode("utf-8"),
+            data=format_ntfy_voice_message(transcript, ai_reply).encode("utf-8"),
             method="POST",
             headers={
                 "Content-Type": "text/plain; charset=utf-8",
@@ -382,17 +390,19 @@ def publish_ntfy_transcript(transcript: str) -> None:
         )
         with urllib.request.urlopen(request, timeout=NTFY_TIMEOUT_SEC) as response:
             response.read()
-        print("[ntfy] ASR transcript notification sent")
+        print("[ntfy] voice notification sent")
     except Exception as exc:
         print(f"[ntfy] notification failed (ignored): {exc}")
 
 
-def start_ntfy_transcript_notification(job_id: int, transcript: str) -> None:
+def start_ntfy_voice_notification(
+    job_id: int, transcript: str, ai_reply: str | None
+) -> None:
     """Dispatch ntfy work separately so TTS never waits for it."""
     try:
         threading.Thread(
-            target=publish_ntfy_transcript,
-            args=(transcript,),
+            target=publish_ntfy_voice_message,
+            args=(transcript, ai_reply),
             name=f"aiy-ntfy-{job_id}",
             daemon=True,
         ).start()
@@ -445,9 +455,8 @@ def run_voice_loop(
         if not transcript:
             raise RuntimeError("ASR returned no text")
 
-        start_ntfy_transcript_notification(job_id, transcript)
-
         tts_input = f"{OMLX_TTS_PREFIX}{transcript}" if OMLX_TTS_PREFIX else transcript
+        ai_reply = None
         try:
             ai_reply, usage = create_openai_reply(transcript)
         except Exception as exc:
@@ -460,6 +469,7 @@ def run_voice_loop(
                 f"[ai] reply ready ({OPENAI_MODEL}; "
                 f"input={input_tokens}, output={output_tokens})"
             )
+        start_ntfy_voice_notification(job_id, transcript, ai_reply)
         tts_request = json.dumps(
             {
                 "model": OMLX_TTS_MODEL,
