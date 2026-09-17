@@ -69,7 +69,7 @@
 ## 專案結構
 - `~/aiy-voice/`：專案程式與 README
 - `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
-- `~/run-button-daemon.sh`：systemd 使用的 daemon 啟動器
+- `~/aiy-voice/run-button-daemon.sh`：systemd 使用的 daemon 啟動器
 - `~/run-echo.sh`：本機錄音 Echo 的手動硬體測試入口
 - `~/run-shutdown-guard.sh`：功能 B 手動測試入口
 - `~/aiy-voice/systemd/aiy-button-daemon.service`：唯一 systemd unit

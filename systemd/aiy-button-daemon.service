@@ -8,7 +8,7 @@ Type=simple
 User=ju
 Group=ju
 WorkingDirectory=/home/ju/aiy-voice
-ExecStart=/home/ju/run-button-daemon.sh
+ExecStart=/home/ju/aiy-voice/run-button-daemon.sh
 Restart=always
 RestartSec=2
 
