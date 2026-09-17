@@ -76,6 +76,24 @@ OMLX_TTS_PREFIX = os.getenv("AIY_OMLX_TTS_PREFIX", "你剛剛說：")
 NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "").rstrip("/")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
 NTFY_TIMEOUT_SEC = float(os.getenv("AIY_NTFY_TIMEOUT_SEC", "5"))
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip(
+    "/"
+)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+OPENAI_TIMEOUT_SEC = float(os.getenv("AIY_OPENAI_TIMEOUT_SEC", "20"))
+OPENAI_MAX_INPUT_CHARS = int(os.getenv("AIY_OPENAI_MAX_INPUT_CHARS", "600"))
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("AIY_OPENAI_MAX_OUTPUT_TOKENS", "120"))
+OPENAI_MAX_REPLY_CHARS = int(os.getenv("AIY_OPENAI_MAX_REPLY_CHARS", "120"))
+OPENAI_INSTRUCTIONS = os.getenv(
+    "AIY_OPENAI_INSTRUCTIONS",
+    (
+        "你是 AIY Voice，一位親切、清楚的家庭語音助理。"
+        "只回答使用者目前這一句話，不假設先前對話。"
+        "使用繁體中文，不要 Markdown、標題或清單。"
+        "回答至多兩句，盡量不超過 80 個中文字，適合直接朗讀。"
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -242,6 +260,108 @@ def post_omlx(path: str, body: bytes, content_type: str) -> bytes:
         raise RuntimeError(f"{path} is unreachable: {exc.reason}") from exc
 
 
+def openai_config_error() -> str | None:
+    if not OPENAI_API_KEY:
+        return "OPENAI_API_KEY is not configured"
+    if OPENAI_MAX_INPUT_CHARS < 1:
+        return "AIY_OPENAI_MAX_INPUT_CHARS must be positive"
+    if OPENAI_MAX_OUTPUT_TOKENS < 1:
+        return "AIY_OPENAI_MAX_OUTPUT_TOKENS must be positive"
+    if OPENAI_MAX_REPLY_CHARS < 1:
+        return "AIY_OPENAI_MAX_REPLY_CHARS must be positive"
+    return None
+
+
+def extract_openai_output_text(response: dict) -> str:
+    """Extract text from a raw Responses API payload without relying on an SDK."""
+    direct_text = response.get("output_text")
+    if isinstance(direct_text, str) and direct_text.strip():
+        return direct_text.strip()
+
+    text_parts: list[str] = []
+    output = response.get("output", [])
+    if not isinstance(output, list):
+        return ""
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "".join(text_parts).strip()
+
+
+def limit_spoken_reply(reply: str) -> str:
+    """Keep a non-compliant model reply from becoming an overly long WAV."""
+    normalized = " ".join(reply.split())
+    if len(normalized) <= OPENAI_MAX_REPLY_CHARS:
+        return normalized
+
+    clipped = normalized[:OPENAI_MAX_REPLY_CHARS]
+    sentence_end = max(clipped.rfind(mark) for mark in "。！？!?")
+    if sentence_end >= OPENAI_MAX_REPLY_CHARS // 2:
+        return clipped[: sentence_end + 1]
+    return clipped.rstrip("，、；：,. ") + "。"
+
+
+def limit_openai_input(transcript: str) -> str:
+    """Bound each stateless request even if an ASR provider returns excess text."""
+    normalized = " ".join(transcript.split())
+    return normalized[:OPENAI_MAX_INPUT_CHARS]
+
+
+def create_openai_reply(transcript: str) -> tuple[str, dict]:
+    """Create one stateless, bounded text reply for Mac TTS."""
+    config_error = openai_config_error()
+    if config_error:
+        raise RuntimeError(config_error)
+
+    request_body = json.dumps(
+        {
+            "model": OPENAI_MODEL,
+            "instructions": OPENAI_INSTRUCTIONS,
+            "input": limit_openai_input(transcript),
+            "store": False,
+            "reasoning": {"effort": "none"},
+            "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+            "text": {"verbosity": "low"},
+        },
+        ensure_ascii=False,
+    ).encode()
+    request = urllib.request.Request(
+        f"{OPENAI_BASE_URL}/responses",
+        data=request_body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=OPENAI_TIMEOUT_SEC) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"OpenAI returned HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenAI is unreachable: {exc.reason}") from exc
+
+    if payload.get("status") != "completed":
+        reason = payload.get("incomplete_details") or payload.get("error") or "unknown"
+        raise RuntimeError(f"OpenAI response did not complete: {reason}")
+
+    reply = limit_spoken_reply(extract_openai_output_text(payload))
+    if not reply:
+        raise RuntimeError("OpenAI returned no spoken reply")
+    usage = payload.get("usage")
+    return reply, usage if isinstance(usage, dict) else {}
+
+
 def publish_ntfy_transcript(transcript: str) -> None:
     """Best-effort ASR transcript notification that never affects voice flow."""
     if not NTFY_BASE_URL or not NTFY_TOPIC:
@@ -328,6 +448,18 @@ def run_voice_loop(
         start_ntfy_transcript_notification(job_id, transcript)
 
         tts_input = f"{OMLX_TTS_PREFIX}{transcript}" if OMLX_TTS_PREFIX else transcript
+        try:
+            ai_reply, usage = create_openai_reply(transcript)
+        except Exception as exc:
+            print(f"[ai] reply unavailable; using ASR confirmation: {exc}")
+        else:
+            tts_input = ai_reply
+            input_tokens = usage.get("input_tokens", "?")
+            output_tokens = usage.get("output_tokens", "?")
+            print(
+                f"[ai] reply ready ({OPENAI_MODEL}; "
+                f"input={input_tokens}, output={output_tokens})"
+            )
         tts_request = json.dumps(
             {
                 "model": OMLX_TTS_MODEL,
