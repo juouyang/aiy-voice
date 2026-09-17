@@ -378,7 +378,7 @@ def main() -> int:
     print("AIY unified button daemon")
     print(f"- Button: {GPIO_CHIP}:{BUTTON_PIN} (active-low)")
     print(f"- LED:    {GPIO_CHIP}:{LED_PIN}")
-    print("- Short press: record, replay, then network voice confirmation")
+    print("- Short press: record/stop; cancel an active voice confirmation")
     print(f"- Recording auto-stop: {MAX_RECORDING_SEC:.1f}s")
     print(
         f"- Auxiliary gesture: release after the {SECONDARY_HOLD_MIN_SEC:.1f}s prompt, then short-press within {SECONDARY_CONFIRM_SEC:.1f}s"
@@ -435,6 +435,33 @@ def main() -> int:
         delete_file(tts_reply_path)
         tts_reply_path = None
         network_error = None
+
+    def voice_turn_is_active() -> bool:
+        """Return whether a completed recording still has audible work pending."""
+        return (
+            player_kind in ("recording", "tts")
+            or network_pending
+            or tts_reply_path is not None
+            or network_error is not None
+        )
+
+    def cancel_voice_turn() -> None:
+        """Immediately return to standby without allowing a stale reply to play."""
+        nonlocal player, player_kind, tts_playback_path
+
+        print("[voice] current turn cancelled by button")
+        if player_kind in ("recording", "tts"):
+            stop_player(player)
+            player = None
+            player_kind = None
+        delete_file(tts_playback_path)
+        tts_playback_path = None
+        invalidate_voice_loop()
+        clear_finished_voice_loop()
+        led.set(False)
+        # The player has already stopped; this is only an audible cancellation
+        # acknowledgement and never delays stopping the caller's audio.
+        cancel_pattern(OUTPUT_VOLUME_GAINS[output_volume_profile])
 
     def start_secondary_wait() -> None:
         nonlocal secondary_pending, secondary_deadline
@@ -777,8 +804,10 @@ def main() -> int:
                         print("[button] auxiliary gesture confirmation ignored")
 
                 elif held <= SHORT_PRESS_MAX_SEC and not warned:
-                    if player or network_pending or tts_reply_path or network_error:
-                        print("[button] short press ignored while voice confirmation is active")
+                    if not recording and voice_turn_is_active():
+                        cancel_voice_turn()
+                    elif player is not None:
+                        print("[button] short press ignored while volume announcement is active")
                     elif not recording:
                         delete_file(WAV_PATH)
                         delete_file(PLAY_WAV_PATH)
