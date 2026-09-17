@@ -48,6 +48,7 @@ from button_shutdown_guard import (
 PROJECT_DIR = Path(__file__).resolve().parent
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.02"))
 ECHO_LED_FLASH_SEC = float(os.getenv("AIY_ECHO_LED_FLASH_SEC", "0.25"))
+MAX_RECORDING_SEC = float(os.getenv("AIY_MAX_RECORDING_SEC", "45"))
 SECONDARY_HOLD_MIN_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MIN_SEC", "1.5"))
 SECONDARY_CONFIRM_SEC = float(os.getenv("AIY_SECONDARY_CONFIRM_SEC", "1.0"))
 SECONDARY_FLASH_SEC = float(os.getenv("AIY_SECONDARY_FLASH_SEC", "0.10"))
@@ -378,6 +379,7 @@ def main() -> int:
     print(f"- Button: {GPIO_CHIP}:{BUTTON_PIN} (active-low)")
     print(f"- LED:    {GPIO_CHIP}:{LED_PIN}")
     print("- Short press: record, replay, then network voice confirmation")
+    print(f"- Recording auto-stop: {MAX_RECORDING_SEC:.1f}s")
     print(
         f"- Auxiliary gesture: release after the {SECONDARY_HOLD_MIN_SEC:.1f}s prompt, then short-press within {SECONDARY_CONFIRM_SEC:.1f}s"
     )
@@ -395,6 +397,7 @@ def main() -> int:
     tts_playback_path = None
     release_prompt_player = None
     recording = False
+    recording_started_at = None
     press_started_at = None
     warned = False
     shutdown_requested = False
@@ -492,6 +495,50 @@ def main() -> int:
             delete_file(tts_playback_path)
             tts_playback_path = None
 
+    def finish_recording(reason: str) -> None:
+        """Stop recording and start the normal Echo/ASR/TTS sequence."""
+        nonlocal recorder, recording, recording_started_at
+        nonlocal job_id, network_pending, network_error, player, player_kind
+        if not recording:
+            return
+
+        print(f"[rec] stop ({reason})")
+        stop_recorder(recorder)
+        recorder = None
+        recording = False
+        recording_started_at = None
+        beep_stop(OUTPUT_VOLUME_GAINS[output_volume_profile])
+
+        if WAV_PATH.exists() and WAV_PATH.stat().st_size > 44:
+            channel, peak_pct, auto = process_for_playback(
+                WAV_PATH,
+                PLAY_WAV_PATH,
+                OUTPUT_VOLUME_GAINS[output_volume_profile],
+            )
+            print(
+                f"[proc] channel={channel} input_peak={peak_pct * 100:.2f}% auto_gain={auto:.2f}x"
+            )
+            job_id += 1
+            network_pending = True
+            network_error = None
+            # Start local playback before copying the WAV for the network
+            # worker, so Echo stays immediate.
+            player = start_echo_playback(play_dev, PLAY_WAV_PATH)
+            if player is not None:
+                player_kind = "recording"
+            else:
+                print("[warn] original playback could not start")
+            try:
+                start_voice_loop(job_id, PLAY_WAV_PATH, results)
+                print("[voice] ASR and TTS request started")
+            except OSError as exc:
+                network_pending = False
+                network_error = f"could not start voice request: {exc}"
+                print(f"[voice] request failed: {network_error}")
+        else:
+            print("[warn] no valid audio recorded")
+            led.set(False)
+
     def trigger_auxiliary_volume() -> None:
         nonlocal output_volume_profile, player, player_kind
         clear_secondary_wait()
@@ -529,6 +576,14 @@ def main() -> int:
                     network_pending = False
                     tts_reply_path = result.reply_path
                     print("[voice] TTS response ready")
+
+            if (
+                recording
+                and recording_started_at is not None
+                and now - recording_started_at >= MAX_RECORDING_SEC
+            ):
+                print(f"[rec] maximum duration reached ({MAX_RECORDING_SEC:.1f}s)")
+                finish_recording("maximum duration")
 
             if (
                 release_prompt_player is not None
@@ -646,6 +701,7 @@ def main() -> int:
                         stop_recorder(recorder)
                         recorder = None
                         recording = False
+                        recording_started_at = None
                     if player:
                         print("[voice] playback interrupted by shutdown request")
                         stop_player(player)
@@ -745,42 +801,9 @@ def main() -> int:
                             ]
                         )
                         recording = True
+                        recording_started_at = time.monotonic()
                     else:
-                        print("[rec] stop")
-                        stop_recorder(recorder)
-                        recorder = None
-                        recording = False
-                        beep_stop(OUTPUT_VOLUME_GAINS[output_volume_profile])
-
-                        if WAV_PATH.exists() and WAV_PATH.stat().st_size > 44:
-                            channel, peak_pct, auto = process_for_playback(
-                                WAV_PATH,
-                                PLAY_WAV_PATH,
-                                OUTPUT_VOLUME_GAINS[output_volume_profile],
-                            )
-                            print(
-                                f"[proc] channel={channel} input_peak={peak_pct * 100:.2f}% auto_gain={auto:.2f}x"
-                            )
-                            job_id += 1
-                            network_pending = True
-                            network_error = None
-                            # Start local playback before copying the WAV for
-                            # the network worker, so Echo stays immediate.
-                            player = start_echo_playback(play_dev, PLAY_WAV_PATH)
-                            if player is not None:
-                                player_kind = "recording"
-                            else:
-                                print("[warn] original playback could not start")
-                            try:
-                                start_voice_loop(job_id, PLAY_WAV_PATH, results)
-                                print("[voice] ASR and TTS request started")
-                            except OSError as exc:
-                                network_pending = False
-                                network_error = f"could not start voice request: {exc}"
-                                print(f"[voice] request failed: {network_error}")
-                        else:
-                            print("[warn] no valid audio recorded")
-                            led.set(False)
+                        finish_recording("button")
 
                 elif warned and held < SHUTDOWN_SEC:
                     print("[cancel] shutdown cancelled")
