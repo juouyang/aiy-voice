@@ -85,11 +85,14 @@ OPENAI_TIMEOUT_SEC = float(os.getenv("AIY_OPENAI_TIMEOUT_SEC", "20"))
 OPENAI_MAX_INPUT_CHARS = int(os.getenv("AIY_OPENAI_MAX_INPUT_CHARS", "600"))
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("AIY_OPENAI_MAX_OUTPUT_TOKENS", "120"))
 OPENAI_MAX_REPLY_CHARS = int(os.getenv("AIY_OPENAI_MAX_REPLY_CHARS", "120"))
+MEMORY_WINDOW_SEC = float(os.getenv("AIY_MEMORY_WINDOW_SEC", "180"))
+MEMORY_MAX_TURNS = int(os.getenv("AIY_MEMORY_MAX_TURNS", "3"))
+MEMORY_MAX_CHARS = int(os.getenv("AIY_MEMORY_MAX_CHARS", "480"))
 OPENAI_INSTRUCTIONS = os.getenv(
     "AIY_OPENAI_INSTRUCTIONS",
     (
         "你是 AIY Voice，一位親切、清楚的家庭語音助理。"
-        "只回答使用者目前這一句話，不假設先前對話。"
+        "近期對話若有提供，只用來理解代詞或延續主題；若無關，以目前問題為主。"
         "使用繁體中文，不要 Markdown、標題或清單。"
         "回答至多兩句，盡量不超過 80 個中文字，適合直接朗讀。"
     ),
@@ -97,9 +100,18 @@ OPENAI_INSTRUCTIONS = os.getenv(
 
 
 @dataclass(frozen=True)
+class ConversationTurn:
+    """One completed, locally held voice exchange."""
+
+    user_text: str
+    assistant_text: str
+
+
+@dataclass(frozen=True)
 class VoiceLoopResult:
     job_id: int
     reply_path: Path | None = None
+    memory_turn: ConversationTurn | None = None
     error: str | None = None
 
 
@@ -269,6 +281,12 @@ def openai_config_error() -> str | None:
         return "AIY_OPENAI_MAX_OUTPUT_TOKENS must be positive"
     if OPENAI_MAX_REPLY_CHARS < 1:
         return "AIY_OPENAI_MAX_REPLY_CHARS must be positive"
+    if MEMORY_WINDOW_SEC <= 0:
+        return "AIY_MEMORY_WINDOW_SEC must be positive"
+    if MEMORY_MAX_TURNS < 1:
+        return "AIY_MEMORY_MAX_TURNS must be positive"
+    if MEMORY_MAX_CHARS < 1:
+        return "AIY_MEMORY_MAX_CHARS must be positive"
     return None
 
 
@@ -316,7 +334,47 @@ def limit_openai_input(transcript: str) -> str:
     return normalized[:OPENAI_MAX_INPUT_CHARS]
 
 
-def create_openai_reply(transcript: str) -> tuple[str, dict]:
+def format_openai_input(
+    transcript: str, conversation_history: tuple[ConversationTurn, ...]
+) -> str:
+    """Build one stateless request with only the newest bounded local turns."""
+    current_text = limit_openai_input(transcript)
+    history_prefix = "近期對話（只供理解上下文）：\n"
+    remaining_chars = MEMORY_MAX_CHARS - len(history_prefix)
+    selected_turns: list[str] = []
+
+    for turn in reversed(conversation_history):
+        turn_text = f"使用者：{turn.user_text}\nAI：{turn.assistant_text}"
+        separator_chars = 2 if selected_turns else 0
+        available_chars = remaining_chars - separator_chars
+        if available_chars < len("使用者：\nAI："):
+            break
+        if len(turn_text) > available_chars:
+            user_chars = available_chars - len("使用者：\nAI：") - len(
+                turn.assistant_text
+            )
+            if user_chars >= 1:
+                turn_text = f"使用者：{turn.user_text[:user_chars]}\nAI：{turn.assistant_text}"
+            else:
+                assistant_chars = available_chars - len("使用者：\nAI：")
+                turn_text = f"使用者：\nAI：{turn.assistant_text[:assistant_chars]}"
+        selected_turns.append(turn_text)
+        remaining_chars -= separator_chars + len(turn_text)
+
+    if not selected_turns:
+        return current_text
+
+    selected_turns.reverse()
+    return (
+        "近期對話（只供理解上下文）：\n"
+        + "\n\n".join(selected_turns)
+        + f"\n\n目前使用者：\n{current_text}"
+    )
+
+
+def create_openai_reply(
+    transcript: str, conversation_history: tuple[ConversationTurn, ...] = ()
+) -> tuple[str, dict]:
     """Create one stateless, bounded text reply for Mac TTS."""
     config_error = openai_config_error()
     if config_error:
@@ -326,7 +384,7 @@ def create_openai_reply(transcript: str) -> tuple[str, dict]:
         {
             "model": OPENAI_MODEL,
             "instructions": OPENAI_INSTRUCTIONS,
-            "input": limit_openai_input(transcript),
+            "input": format_openai_input(transcript, conversation_history),
             "store": False,
             "reasoning": {"effort": "none"},
             "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
@@ -438,7 +496,10 @@ def encode_transcription_request(wav_path: Path) -> tuple[bytes, str]:
 
 
 def run_voice_loop(
-    job_id: int, wav_path: Path, results: queue.Queue[VoiceLoopResult]
+    job_id: int,
+    wav_path: Path,
+    conversation_history: tuple[ConversationTurn, ...],
+    results: queue.Queue[VoiceLoopResult],
 ) -> None:
     reply_path = PLAY_WAV_PATH.with_name(f"aiy-tts-reply-{job_id}.wav")
     temporary_reply_path = reply_path.with_suffix(".wav.tmp")
@@ -457,12 +518,16 @@ def run_voice_loop(
 
         tts_input = f"{OMLX_TTS_PREFIX}{transcript}" if OMLX_TTS_PREFIX else transcript
         ai_reply = None
+        memory_turn = None
         try:
-            ai_reply, usage = create_openai_reply(transcript)
+            ai_reply, usage = create_openai_reply(transcript, conversation_history)
         except Exception as exc:
             print(f"[ai] reply unavailable; using ASR confirmation: {exc}")
         else:
             tts_input = ai_reply
+            memory_turn = ConversationTurn(
+                user_text=limit_openai_input(transcript), assistant_text=ai_reply
+            )
             input_tokens = usage.get("input_tokens", "?")
             output_tokens = usage.get("output_tokens", "?")
             print(
@@ -488,7 +553,11 @@ def run_voice_loop(
 
         temporary_reply_path.write_bytes(audio)
         temporary_reply_path.replace(reply_path)
-        results.put(VoiceLoopResult(job_id=job_id, reply_path=reply_path))
+        results.put(
+            VoiceLoopResult(
+                job_id=job_id, reply_path=reply_path, memory_turn=memory_turn
+            )
+        )
     except Exception as exc:
         delete_file(temporary_reply_path)
         delete_file(reply_path)
@@ -498,13 +567,16 @@ def run_voice_loop(
 
 
 def start_voice_loop(
-    job_id: int, source_path: Path, results: queue.Queue[VoiceLoopResult]
+    job_id: int,
+    source_path: Path,
+    conversation_history: tuple[ConversationTurn, ...],
+    results: queue.Queue[VoiceLoopResult],
 ) -> None:
     worker_path = source_path.with_name(f"aiy-voice-loop-{job_id}.wav")
     shutil.copyfile(source_path, worker_path)
     threading.Thread(
         target=run_voice_loop,
-        args=(job_id, worker_path, results),
+        args=(job_id, worker_path, conversation_history, results),
         name=f"aiy-voice-loop-{job_id}",
         daemon=True,
     ).start()
@@ -529,6 +601,11 @@ def main() -> int:
         "- Auxiliary volume: "
         "quiet 0.35x, normal 0.65x, loud 1.00x (fixed prompt WAVs only)"
     )
+    print(
+        "- Local short-term memory: "
+        f"{MEMORY_WINDOW_SEC:.0f}s, {MEMORY_MAX_TURNS} completed turns, "
+        f"{MEMORY_MAX_CHARS} history chars"
+    )
     print(f"- Shutdown warning: {WARN_SEC:.1f}s")
     print(f"- Shutdown: {SHUTDOWN_SEC:.1f}s")
 
@@ -550,6 +627,9 @@ def main() -> int:
     network_pending = False
     tts_reply_path = None
     network_error = None
+    pending_memory_turn = None
+    conversation_history: list[ConversationTurn] = []
+    last_memory_commit_at = None
     secondary_pending = False
     secondary_deadline = None
     secondary_flash_edges_remaining = 0
@@ -572,11 +652,36 @@ def main() -> int:
 
     def invalidate_voice_loop() -> None:
         nonlocal job_id, network_pending, tts_reply_path, network_error
+        nonlocal pending_memory_turn
         job_id += 1
         network_pending = False
         delete_file(tts_reply_path)
         tts_reply_path = None
         network_error = None
+        pending_memory_turn = None
+
+    def commit_memory_turn() -> None:
+        """Keep an exchange only after its final AI reply was heard in full."""
+        nonlocal pending_memory_turn, last_memory_commit_at
+        if pending_memory_turn is None:
+            return
+        conversation_history.append(pending_memory_turn)
+        del conversation_history[:-MEMORY_MAX_TURNS]
+        last_memory_commit_at = time.monotonic()
+        pending_memory_turn = None
+        print(f"[memory] saved local turn ({len(conversation_history)} retained)")
+
+    def expire_conversation_memory(now: float) -> None:
+        """Forget idle local context without writing it to disk."""
+        nonlocal last_memory_commit_at
+        if (
+            conversation_history
+            and last_memory_commit_at is not None
+            and now - last_memory_commit_at >= MEMORY_WINDOW_SEC
+        ):
+            conversation_history.clear()
+            last_memory_commit_at = None
+            print("[memory] local context expired")
 
     def voice_turn_is_active() -> bool:
         """Return whether a completed recording still has audible work pending."""
@@ -637,6 +742,7 @@ def main() -> int:
 
     def start_tts_playback() -> None:
         nonlocal player, player_kind, tts_reply_path, tts_playback_path
+        nonlocal pending_memory_turn
         if tts_reply_path is None:
             return
         source_path = tts_reply_path
@@ -663,6 +769,7 @@ def main() -> int:
             print("[warn] TTS playback could not start")
             delete_file(tts_playback_path)
             tts_playback_path = None
+            pending_memory_turn = None
 
     def finish_recording(reason: str) -> None:
         """Stop recording and start the normal Echo/ASR/TTS sequence."""
@@ -698,7 +805,12 @@ def main() -> int:
             else:
                 print("[warn] original playback could not start")
             try:
-                start_voice_loop(job_id, PLAY_WAV_PATH, results)
+                start_voice_loop(
+                    job_id,
+                    PLAY_WAV_PATH,
+                    tuple(conversation_history),
+                    results,
+                )
                 print("[voice] ASR and TTS request started")
             except OSError as exc:
                 network_pending = False
@@ -728,6 +840,7 @@ def main() -> int:
 
         while True:
             now = time.monotonic()
+            expire_conversation_memory(now)
 
             while True:
                 try:
@@ -744,6 +857,7 @@ def main() -> int:
                 else:
                     network_pending = False
                     tts_reply_path = result.reply_path
+                    pending_memory_turn = result.memory_turn
                     print("[voice] TTS response ready")
 
             if (
@@ -776,6 +890,7 @@ def main() -> int:
                     print("[tts] playback done")
                     delete_file(tts_playback_path)
                     tts_playback_path = None
+                    commit_memory_turn()
                     clear_finished_voice_loop()
                 elif finished_kind == "volume":
                     print("[volume] announcement done")

@@ -7,7 +7,7 @@
 2. 功能 B：長按安全關機（10 秒警告，12 秒關機）
 3. 輔助手勢：切換所有 daemon 聲音的三段輸出音量
 
-功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字會以單次、無對話歷史的 OpenAI Responses API 請求產生回覆，再交由 Mac TTS 播放。
+功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字會以單次、由 daemon 本機短期記憶補足上下文的 OpenAI Responses API 請求產生回覆，再交由 Mac TTS 播放。
 
 ## 常駐按鈕行為
 
@@ -21,6 +21,7 @@
 | 停止並確認 | 第二次短按 | 下行提示音、LED 閃爍 | 立即播放原始錄音；背景呼叫 Mac ASR、OpenAI 與 Mac TTS |
 | 錄音時間上限 | 錄音達 45 秒 | 下行提示音、LED 閃爍 | 自動停止錄音，接續原始錄音 Echo、ASR、OpenAI 與 TTS |
 | 語音確認 | 原始錄音播放完 | LED 持續閃爍 | 播放 Mac TTS 產生的簡短 AI 回覆 |
+| 本機短期記憶 | AI 回覆完整播放完畢 | 無額外聲光提示 | 記住本輪問答，供接下來 3 分鐘內的後續對話理解上下文 |
 | 取消語音本輪 | Echo 回放、網路處理或最終 TTS WAV 播放中短按一次 | 立即停止目前聲音、取消提示音、LED 熄滅 | 捨棄本輪後續回覆並回待命；下一次短按才開始新錄音 |
 | 回到待命 | TTS 播放結束 | LED 熄滅 | 可開始下一輪 |
 | 輔助手勢準備 | 待命時按住滿約 1.5 秒 | LED 常亮、以目前音量播放 TTS 提示「現在可放開」 | 聽到後放開；未進入 10 秒關機警告前都有效 |
@@ -57,7 +58,7 @@
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。
-- 若存在 `~/.config/aiy-voice/openai.env`，daemon 會讀取 `OPENAI_API_KEY` 與可選的 `OPENAI_MODEL`（預設 `gpt-5.4-mini`）。每次只傳送 ASR 文字，不傳送 WAV；請求設為 `store: false`、不保留對話歷史、`reasoning: none`，輸入最多 600 個字元，並硬性限制輸出最多 120 tokens 與 120 個字元。實際每輪 input/output token 用量只寫入本機 service log，不含內容。
+- 若存在 `~/.config/aiy-voice/openai.env`，daemon 會讀取 `OPENAI_API_KEY` 與可選的 `OPENAI_MODEL`（預設 `gpt-5.4-mini`）。每次只傳送 ASR 文字，不傳送 WAV；請求設為 `store: false`、`reasoning: none`，目前文字最多 600 個字元，並硬性限制輸出最多 120 tokens 與 120 個字元。daemon 僅在記憶體中保留最近 3 分鐘、最多 3 組「已完整播放 AI 回覆」的問答，另以最多 480 個字元附入下一次請求；取消、失敗、daemon 重啟或閒置逾時都不會保留。可在裝置私有環境設定中以 `AIY_MEMORY_WINDOW_SEC`、`AIY_MEMORY_MAX_TURNS`、`AIY_MEMORY_MAX_CHARS` 調整。實際每輪 input/output token 用量只寫入本機 service log，不含內容。
 - 若存在 `~/.config/aiy-voice/ntfy.env`，daemon 會使用其中的 `NTFY_BASE_URL` 與 `NTFY_TOPIC`，在 OpenAI 回覆後背景傳送同一則「你說：ASR 文字／AI：回覆」通知。通知不使用 token，失敗只記錄 log，絕不延遲或中斷 Echo／TTS；若 OpenAI 失敗，則只傳 ASR 文字。
 - 輔助手勢的預先生成 TTS 提示音及音量公告存放於 `assets/gain/{quiet,normal,loud}/`，隨專案版本追蹤。各目錄的固定 gain 分別為安靜 0.35×、標準 0.65×、大聲 1.00×，因此裝置播放時不必重新計算。
 - 選取的輸出音量只寫入裝置本機的 `~/.config/aiy-voice/output-volume.env`，並在 daemon 重啟後保留；首次安裝預設為大聲，與原先已驗證的音量相同。
