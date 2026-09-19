@@ -55,6 +55,24 @@
 
 測試功能 B 時，10 秒會播放警告音；若只想確認警告，請在 12 秒前放開按鈕以取消關機。
 
+## Pi RPC baseline（尚未接入 daemon）
+
+`pi_rpc_baseline.py` 是下一階段的手動效能驗證工具；它不會啟動 GPIO、修改現有 daemon，或取代目前的 OpenAI API 流程。每次執行只啟動一個常駐 Pi RPC process，循序送入問題並在結束時關閉它，方便比較首題與後續題的延遲與 RSS。輸出的 `reported-tokens` 是 Pi RPC 提供的數值；目前使用 ChatGPT Codex OAuth 時可能固定為 `0`，不可當成實際用量統計。
+
+先完成 Pi 的 ChatGPT Codex OAuth 登入後，在 AIY 上執行：
+
+```bash
+python3 ~/aiy-voice/pi_rpc_baseline.py --repeat 3 "Hi"
+```
+
+也可傳入連續對話，例如：
+
+```bash
+python3 ~/aiy-voice/pi_rpc_baseline.py "我叫小明。" "我叫什麼？"
+```
+
+baseline 固定使用 `openai-codex/gpt-5.6-luna`、`thinking off`，並傳入 `--no-session --no-builtin-tools --no-extensions --no-skills --no-prompt-templates --no-context-files`。因此沒有網路、bash、讀寫檔案或其他工具；它只驗證 Python 透過 JSONL 與常駐 Pi RPC 溝通的成本。日後第二階段才會顯式加入唯一的受控網路工具。
+
 ## 本機設定與安全
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
@@ -73,6 +91,7 @@
 ## 專案結構
 - `~/aiy-voice/`：專案程式與 README
 - `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
+- `~/aiy-voice/pi_rpc_baseline.py`：不接 GPIO 的 Pi RPC 常駐效能測試
 - `~/aiy-voice/run-button-daemon.sh`：systemd 使用的 daemon 啟動器
 - `~/run-echo.sh`：本機錄音 Echo 的手動硬體測試入口
 - `~/run-shutdown-guard.sh`：功能 B 手動測試入口
