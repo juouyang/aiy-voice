@@ -4,6 +4,7 @@
 import json
 import os
 import queue
+import re
 import shutil
 import signal
 import subprocess
@@ -100,12 +101,26 @@ ASSISTANT_PROFILE_MAX_CHARS = int(
     os.getenv("AIY_ASSISTANT_PROFILE_MAX_CHARS", "1200")
 )
 ASSISTANT_TIMEZONE = os.getenv("AIY_ASSISTANT_TIMEZONE", "Asia/Taipei")
+WEB_SEARCH_ENABLED = os.getenv("AIY_WEB_SEARCH_ENABLED", "1").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+WEB_SEARCH_CONTEXT_SIZE = os.getenv("AIY_WEB_SEARCH_CONTEXT_SIZE", "low")
+WEB_SEARCH_MAX_SOURCES = int(os.getenv("AIY_WEB_SEARCH_MAX_SOURCES", "3"))
+WEB_SEARCH_COUNTRY = os.getenv("AIY_WEB_SEARCH_COUNTRY", "")
+WEB_SEARCH_REGION = os.getenv("AIY_WEB_SEARCH_REGION", "")
+WEB_SEARCH_CITY = os.getenv("AIY_WEB_SEARCH_CITY", "")
+WEB_SEARCH_TIMEZONE = os.getenv("AIY_WEB_SEARCH_TIMEZONE", ASSISTANT_TIMEZONE)
 OPENAI_INSTRUCTIONS = os.getenv(
     "AIY_OPENAI_INSTRUCTIONS",
     (
         "你是 AIY Voice，一位親切、清楚的家庭語音助理。"
         "近期對話若有提供，只用來理解代詞或延續主題；若無關，以目前問題為主。"
-        "這是共享的家庭裝置；不可只根據聲音或語句猜測目前使用者的身份。"
+        "只有使用者明確要求查詢、搜尋、上網查，或明確要求最新資料時，才可使用網路搜尋。"
+        "若問題可能需要即時資料但未明確要求查詢，先問是否要上網查，不要自行搜尋。"
+        "使用網路搜尋時，只回答適合朗讀的結論；不得說出 URL、引用或來源。"
         "使用繁體中文，不要 Markdown、標題或清單。"
         "回答至多兩句，盡量不超過 80 個中文字，適合直接朗讀。"
     ),
@@ -118,6 +133,14 @@ class ConversationTurn:
 
     user_text: str
     assistant_text: str
+
+
+@dataclass(frozen=True)
+class WebSource:
+    """One web citation safe to put in ntfy, never in speech synthesis."""
+
+    title: str
+    url: str
 
 
 @dataclass(frozen=True)
@@ -302,36 +325,117 @@ def openai_config_error() -> str | None:
         return "AIY_MEMORY_MAX_CHARS must be positive"
     if ASSISTANT_PROFILE_MAX_CHARS < 1:
         return "AIY_ASSISTANT_PROFILE_MAX_CHARS must be positive"
+    if WEB_SEARCH_CONTEXT_SIZE not in {"low", "medium", "high"}:
+        return "AIY_WEB_SEARCH_CONTEXT_SIZE must be low, medium, or high"
+    if WEB_SEARCH_MAX_SOURCES < 1:
+        return "AIY_WEB_SEARCH_MAX_SOURCES must be positive"
+    if WEB_SEARCH_COUNTRY and len(WEB_SEARCH_COUNTRY) != 2:
+        return "AIY_WEB_SEARCH_COUNTRY must be a two-letter ISO country code"
     try:
         ZoneInfo(ASSISTANT_TIMEZONE)
+        ZoneInfo(WEB_SEARCH_TIMEZONE)
     except ZoneInfoNotFoundError:
-        return "AIY_ASSISTANT_TIMEZONE is invalid"
+        return "AIY_ASSISTANT_TIMEZONE or AIY_WEB_SEARCH_TIMEZONE is invalid"
     return None
 
 
-def extract_openai_output_text(response: dict) -> str:
-    """Extract text from a raw Responses API payload without relying on an SDK."""
-    direct_text = response.get("output_text")
-    if isinstance(direct_text, str) and direct_text.strip():
-        return direct_text.strip()
+URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(https?://[^)]+\)", re.IGNORECASE)
+INLINE_CITATION_PATTERN = re.compile(r"cite[^]+")
 
+
+def add_web_source(
+    raw_source: object, sources: list[WebSource], seen_urls: set[str]
+) -> None:
+    """Keep a small, deduplicated source list without trusting source formatting."""
+    if not isinstance(raw_source, dict):
+        return
+    citation = raw_source.get("url_citation")
+    source = citation if isinstance(citation, dict) else raw_source
+    url = source.get("url")
+    if not isinstance(url, str):
+        return
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or url in seen_urls:
+        return
+
+    title = source.get("title")
+    title_text = " ".join(title.split()) if isinstance(title, str) else ""
+    sources.append(WebSource(title=title_text[:160] or parsed.netloc, url=url))
+    seen_urls.add(url)
+
+
+def strip_inline_citations(text: str, annotations: object) -> str:
+    """Remove the annotation spans before sending a web answer to TTS."""
+    if not isinstance(annotations, list):
+        return text
+    spans: list[tuple[int, int]] = []
+    for annotation in annotations:
+        if not isinstance(annotation, dict) or annotation.get("type") != "url_citation":
+            continue
+        start = annotation.get("start_index")
+        end = annotation.get("end_index")
+        if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(text):
+            spans.append((start, end))
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + text[end:]
+    return text
+
+
+def strip_spoken_urls(text: str) -> str:
+    """URLs and citations are for ntfy only, never for the speech path."""
+    text = MARKDOWN_LINK_PATTERN.sub(r"\1", text)
+    text = URL_PATTERN.sub("", text)
+    return INLINE_CITATION_PATTERN.sub("", text)
+
+
+def extract_openai_reply(
+    response: dict,
+) -> tuple[str, tuple[WebSource, ...], bool]:
+    """Extract display sources separately from the spoken response text."""
     text_parts: list[str] = []
+    sources: list[WebSource] = []
+    seen_urls: set[str] = set()
+    web_search_used = False
     output = response.get("output", [])
-    if not isinstance(output, list):
-        return ""
-    for item in output:
-        if not isinstance(item, dict) or item.get("type") != "message":
-            continue
-        content = item.get("content", [])
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict) or part.get("type") != "output_text":
+
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
                 continue
-            text = part.get("text")
-            if isinstance(text, str):
-                text_parts.append(text)
-    return "".join(text_parts).strip()
+            if item.get("type") == "web_search_call":
+                web_search_used = True
+                action = item.get("action")
+                if isinstance(action, dict):
+                    action_sources = action.get("sources", [])
+                    if isinstance(action_sources, list):
+                        for source in action_sources:
+                            add_web_source(source, sources, seen_urls)
+                continue
+            if item.get("type") != "message":
+                continue
+            content = item.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "output_text":
+                    continue
+                text = part.get("text")
+                if not isinstance(text, str):
+                    continue
+                annotations = part.get("annotations", [])
+                if isinstance(annotations, list):
+                    for annotation in annotations:
+                        add_web_source(annotation, sources, seen_urls)
+                text_parts.append(strip_inline_citations(text, annotations))
+
+    if not text_parts:
+        direct_text = response.get("output_text")
+        if isinstance(direct_text, str):
+            text_parts.append(direct_text)
+
+    reply = strip_spoken_urls("".join(text_parts)).strip()
+    return reply, tuple(sources[:WEB_SEARCH_MAX_SOURCES]), web_search_used
 
 
 def limit_spoken_reply(reply: str) -> str:
@@ -393,6 +497,24 @@ def build_openai_instructions() -> str:
     return "\n\n".join(context_parts)
 
 
+def build_web_search_tool() -> dict:
+    """Build the only external tool available to the household assistant."""
+    tool: dict[str, object] = {
+        "type": "web_search",
+        "search_context_size": WEB_SEARCH_CONTEXT_SIZE,
+    }
+    location = {
+        "country": WEB_SEARCH_COUNTRY,
+        "region": WEB_SEARCH_REGION,
+        "city": WEB_SEARCH_CITY,
+        "timezone": WEB_SEARCH_TIMEZONE,
+    }
+    location = {key: value for key, value in location.items() if value}
+    if location:
+        tool["user_location"] = {"type": "approximate", **location}
+    return tool
+
+
 def format_openai_input(
     transcript: str, conversation_history: tuple[ConversationTurn, ...]
 ) -> str:
@@ -433,24 +555,27 @@ def format_openai_input(
 
 def create_openai_reply(
     transcript: str, conversation_history: tuple[ConversationTurn, ...] = ()
-) -> tuple[str, dict]:
+) -> tuple[str, dict, tuple[WebSource, ...], bool]:
     """Create one stateless, bounded text reply for Mac TTS."""
     config_error = openai_config_error()
     if config_error:
         raise RuntimeError(config_error)
 
-    request_body = json.dumps(
-        {
-            "model": OPENAI_MODEL,
-            "instructions": build_openai_instructions(),
-            "input": format_openai_input(transcript, conversation_history),
-            "store": False,
-            "reasoning": {"effort": "none"},
-            "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
-            "text": {"verbosity": "low"},
-        },
-        ensure_ascii=False,
-    ).encode()
+    request_payload: dict[str, object] = {
+        "model": OPENAI_MODEL,
+        "instructions": build_openai_instructions(),
+        "input": format_openai_input(transcript, conversation_history),
+        "store": False,
+        "reasoning": {"effort": "none"},
+        "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+        "text": {"verbosity": "low"},
+    }
+    if WEB_SEARCH_ENABLED:
+        request_payload["tools"] = [build_web_search_tool()]
+        request_payload["tool_choice"] = "auto"
+        request_payload["include"] = ["web_search_call.action.sources"]
+
+    request_body = json.dumps(request_payload, ensure_ascii=False).encode()
     request = urllib.request.Request(
         f"{OPENAI_BASE_URL}/responses",
         data=request_body,
@@ -472,22 +597,39 @@ def create_openai_reply(
         reason = payload.get("incomplete_details") or payload.get("error") or "unknown"
         raise RuntimeError(f"OpenAI response did not complete: {reason}")
 
-    reply = limit_spoken_reply(extract_openai_output_text(payload))
+    response_text, web_sources, web_search_used = extract_openai_reply(payload)
+    reply = limit_spoken_reply(response_text)
     if not reply:
         raise RuntimeError("OpenAI returned no spoken reply")
     usage = payload.get("usage")
-    return reply, usage if isinstance(usage, dict) else {}
+    return reply, usage if isinstance(usage, dict) else {}, web_sources, web_search_used
 
 
-def format_ntfy_voice_message(transcript: str, ai_reply: str | None) -> str:
-    """Keep the user's words and the assistant's reply together for review."""
+def format_ntfy_voice_message(
+    transcript: str,
+    ai_reply: str | None,
+    web_sources: tuple[WebSource, ...] = (),
+    web_search_used: bool = False,
+) -> str:
+    """Keep spoken content and clickable web sources separate for review."""
     message = f"你說：{transcript}"
     if ai_reply:
         message += f"\n\nAI：{ai_reply}"
+    if web_search_used:
+        message += "\n\n網路查詢：已使用"
+    if web_sources:
+        message += "\n\n來源："
+        for source in web_sources:
+            message += f"\n- {source.title}\n  {source.url}"
     return message
 
 
-def publish_ntfy_voice_message(transcript: str, ai_reply: str | None) -> None:
+def publish_ntfy_voice_message(
+    transcript: str,
+    ai_reply: str | None,
+    web_sources: tuple[WebSource, ...],
+    web_search_used: bool,
+) -> None:
     """Best-effort voice notification that never affects the playback flow."""
     if not NTFY_BASE_URL or not NTFY_TOPIC:
         print("[ntfy] notification skipped: NTFY_BASE_URL or NTFY_TOPIC is missing")
@@ -496,7 +638,9 @@ def publish_ntfy_voice_message(transcript: str, ai_reply: str | None) -> None:
     try:
         request = urllib.request.Request(
             f"{NTFY_BASE_URL}/{urllib.parse.quote(NTFY_TOPIC, safe='')}",
-            data=format_ntfy_voice_message(transcript, ai_reply).encode("utf-8"),
+            data=format_ntfy_voice_message(
+                transcript, ai_reply, web_sources, web_search_used
+            ).encode("utf-8"),
             method="POST",
             headers={
                 "Content-Type": "text/plain; charset=utf-8",
@@ -513,13 +657,17 @@ def publish_ntfy_voice_message(transcript: str, ai_reply: str | None) -> None:
 
 
 def start_ntfy_voice_notification(
-    job_id: int, transcript: str, ai_reply: str | None
+    job_id: int,
+    transcript: str,
+    ai_reply: str | None,
+    web_sources: tuple[WebSource, ...] = (),
+    web_search_used: bool = False,
 ) -> None:
     """Dispatch ntfy work separately so TTS never waits for it."""
     try:
         threading.Thread(
             target=publish_ntfy_voice_message,
-            args=(transcript, ai_reply),
+            args=(transcript, ai_reply, web_sources, web_search_used),
             name=f"aiy-ntfy-{job_id}",
             daemon=True,
         ).start()
@@ -577,9 +725,13 @@ def run_voice_loop(
 
         tts_input = f"{OMLX_TTS_PREFIX}{transcript}" if OMLX_TTS_PREFIX else transcript
         ai_reply = None
+        web_sources: tuple[WebSource, ...] = ()
+        web_search_used = False
         memory_turn = None
         try:
-            ai_reply, usage = create_openai_reply(transcript, conversation_history)
+            ai_reply, usage, web_sources, web_search_used = create_openai_reply(
+                transcript, conversation_history
+            )
         except Exception as exc:
             print(f"[ai] reply unavailable; using ASR confirmation: {exc}")
         else:
@@ -593,7 +745,11 @@ def run_voice_loop(
                 f"[ai] reply ready ({OPENAI_MODEL}; "
                 f"input={input_tokens}, output={output_tokens})"
             )
-        start_ntfy_voice_notification(job_id, transcript, ai_reply)
+            if web_search_used:
+                print(f"[web] search completed ({len(web_sources)} source(s))")
+        start_ntfy_voice_notification(
+            job_id, transcript, ai_reply, web_sources, web_search_used
+        )
         tts_request = json.dumps(
             {
                 "model": OMLX_TTS_MODEL,

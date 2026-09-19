@@ -14,6 +14,12 @@ if test -r "$ntfy_env_file"; then
   source "$ntfy_env_file"
   set +a
 fi
+web_search_env_file="${AIY_WEB_SEARCH_ENV_FILE:-$HOME/.config/aiy-voice/web-search.env}"
+if test -r "$web_search_env_file"; then
+  set -a
+  source "$web_search_env_file"
+  set +a
+fi
 openai_env_file="${AIY_OPENAI_ENV_FILE:-$HOME/.config/aiy-voice/openai.env}"
 if test -r "$openai_env_file"; then
   set -a
