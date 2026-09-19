@@ -7,7 +7,7 @@
 2. 功能 B：長按安全關機（10 秒警告，12 秒關機）
 3. 輔助手勢：切換所有 daemon 聲音的三段輸出音量
 
-功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字會以單次、由 daemon 本機短期記憶、固定家庭背景、即時本機時間與受控網路搜尋補足上下文的 OpenAI Responses API 請求產生回覆，再交由 Mac TTS 播放。
+功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字會以單次、由 daemon 本機短期記憶、固定家庭背景與即時本機時間補足上下文的 OpenAI Responses API 請求產生回覆，再交由 Mac TTS 播放。
 
 ## 常駐按鈕行為
 
@@ -23,7 +23,6 @@
 | 語音確認 | 原始錄音播放完 | LED 持續閃爍 | 播放 Mac TTS 產生的簡短 AI 回覆 |
 | 本機短期記憶 | AI 回覆完整播放完畢 | 無額外聲光提示 | 記住本輪問答，供接下來 3 分鐘內的後續對話理解上下文 |
 | 固定家庭背景與時間 | 每次 OpenAI 請求 | 無額外聲光提示 | 附入管理者設定的家庭背景與 Asia/Taipei 即時時間；不會自行寫入新資料 |
-| 受控網路查詢 | 使用者明確要求「查詢／搜尋／上網查」或最新資料 | LED 維持閃爍直到結果完成 | OpenAI 視需要查詢網路；TTS 只讀結論，來源只傳 ntfy |
 | 取消語音本輪 | Echo 回放、網路處理或最終 TTS WAV 播放中短按一次 | 立即停止目前聲音、取消提示音、LED 熄滅 | 捨棄本輪後續回覆並回待命；下一次短按才開始新錄音 |
 | 回到待命 | TTS 播放結束 | LED 熄滅 | 可開始下一輪 |
 | 輔助手勢準備 | 待命時按住滿約 1.5 秒 | LED 常亮、以目前音量播放 TTS 提示「現在可放開」 | 聽到後放開；未進入 10 秒關機警告前都有效 |
@@ -62,8 +61,7 @@
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。
 - 若存在 `~/.config/aiy-voice/openai.env`，daemon 會讀取 `OPENAI_API_KEY` 與可選的 `OPENAI_MODEL`（預設 `gpt-5.4-mini`）。每次只傳送 ASR 文字，不傳送 WAV；請求設為 `store: false`、`reasoning: none`，目前文字最多 600 個字元，並硬性限制輸出最多 120 tokens 與 120 個字元。daemon 僅在記憶體中保留最近 3 分鐘、最多 3 組「已完整播放 AI 回覆」的問答，另以最多 480 個字元附入下一次請求；取消、失敗、daemon 重啟或閒置逾時都不會保留。可在裝置私有環境設定中以 `AIY_MEMORY_WINDOW_SEC`、`AIY_MEMORY_MAX_TURNS`、`AIY_MEMORY_MAX_CHARS` 調整。實際每輪 input/output token 用量只寫入本機 service log，不含內容。
 - daemon 會在每次 OpenAI 請求時，以 `AIY_ASSISTANT_TIMEZONE`（預設 `Asia/Taipei`）取得裝置目前時間，供模型回答時間與日期問題；這不是模型自行推測的時間。
-- 固定家庭背景放在裝置私有的 `~/.config/aiy-voice/assistant-profile.md`，每次請求重新讀取，最多 1,200 個字元。適合放裝置位置、時區與共享使用情境；不可提交到 repository。請從 [範例](examples/assistant-profile.md.example) 複製後填入裝置專屬內容。這份檔案不是模型的可寫長期記憶，模型不會自行新增或修改其中資料。
-- daemon 會從裝置私有的 `~/.config/aiy-voice/web-search.env` 載入 OpenAI web search 設定；請從 [範例](examples/web-search.env.example) 複製後填入近似位置。模型只有在使用者明確要求查詢／搜尋／上網查，或明確要求最新資料時才可實際搜尋；若即時問題未明確要求，會先詢問。每次搜尋使用 `low` context，最多記錄 3 個來源到 ntfy。URL 與 citation 一律自最終 TTS 文字移除。
+- 固定家庭背景放在裝置私有的 `~/.config/aiy-voice/assistant-profile.md`，每次請求重新讀取，最多 1,200 個字元。適合放裝置地點與共享使用情境；不可提交到 repository。請從 [範例](examples/assistant-profile.md.example) 複製後填入裝置專屬內容。這份檔案不是模型的可寫長期記憶，模型不會自行新增或修改其中資料，也不可僅根據聲音猜測目前使用者身份。
 - 若存在 `~/.config/aiy-voice/ntfy.env`，daemon 會使用其中的 `NTFY_BASE_URL` 與 `NTFY_TOPIC`，在 OpenAI 回覆後背景傳送同一則「你說：ASR 文字／AI：回覆」通知。通知不使用 token，失敗只記錄 log，絕不延遲或中斷 Echo／TTS；若 OpenAI 失敗，則只傳 ASR 文字。
 - 輔助手勢的預先生成 TTS 提示音及音量公告存放於 `assets/gain/{quiet,normal,loud}/`，隨專案版本追蹤。各目錄的固定 gain 分別為安靜 0.35×、標準 0.65×、大聲 1.00×，因此裝置播放時不必重新計算。
 - 選取的輸出音量只寫入裝置本機的 `~/.config/aiy-voice/output-volume.env`，並在 daemon 重啟後保留；首次安裝預設為大聲，與原先已驗證的音量相同。
