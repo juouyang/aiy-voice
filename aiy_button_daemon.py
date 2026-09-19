@@ -120,7 +120,8 @@ OPENAI_INSTRUCTIONS = os.getenv(
         "近期對話若有提供，只用來理解代詞或延續主題；若無關，以目前問題為主。"
         "只有使用者明確要求查詢、搜尋、上網查，或明確要求最新資料時，才可使用網路搜尋。"
         "若問題可能需要即時資料但未明確要求查詢，先問是否要上網查，不要自行搜尋。"
-        "使用網路搜尋時，只回答適合朗讀的結論；不得說出 URL、引用或來源。"
+        "使用網路搜尋時，只回答適合朗讀的結論；不要手動列出 URL 或來源。"
+        "系統會另外處理 API 提供的 citations 與來源。"
         "使用繁體中文，不要 Markdown、標題或清單。"
         "回答至多兩句，盡量不超過 80 個中文字，適合直接朗讀。"
     ),
@@ -140,7 +141,7 @@ class WebSource:
     """One web citation safe to put in ntfy, never in speech synthesis."""
 
     title: str
-    url: str
+    url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -353,16 +354,26 @@ def add_web_source(
     citation = raw_source.get("url_citation")
     source = citation if isinstance(citation, dict) else raw_source
     url = source.get("url")
-    if not isinstance(url, str):
-        return
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or url in seen_urls:
+    if isinstance(url, str):
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or url in seen_urls:
+            return
+        title = source.get("title")
+        title_text = " ".join(title.split()) if isinstance(title, str) else ""
+        sources.append(WebSource(title=title_text[:160] or parsed.netloc, url=url))
+        seen_urls.add(url)
         return
 
-    title = source.get("title")
-    title_text = " ".join(title.split()) if isinstance(title, str) else ""
-    sources.append(WebSource(title=title_text[:160] or parsed.netloc, url=url))
-    seen_urls.add(url)
+    name = source.get("name")
+    source_type = source.get("type")
+    label = name if isinstance(name, str) and name.strip() else source_type
+    if not isinstance(label, str):
+        return
+    label = " ".join(label.split())[:160]
+    source_id = f"source:{label}"
+    if label and source_id not in seen_urls:
+        sources.append(WebSource(title=label))
+        seen_urls.add(source_id)
 
 
 def strip_inline_citations(text: str, annotations: object) -> str:
@@ -620,7 +631,9 @@ def format_ntfy_voice_message(
     if web_sources:
         message += "\n\n來源："
         for source in web_sources:
-            message += f"\n- {source.title}\n  {source.url}"
+            message += f"\n- {source.title}"
+            if source.url:
+                message += f"\n  {source.url}"
     return message
 
 
