@@ -71,7 +71,15 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --repeat 3 "Hi"
 python3 ~/aiy-voice/pi_rpc_baseline.py "我叫小明。" "我叫什麼？"
 ```
 
-baseline 固定使用 `openai-codex/gpt-5.6-luna`、`thinking off`，並傳入 `--no-session --no-builtin-tools --no-extensions --no-skills --no-prompt-templates --no-context-files`。因此沒有網路、bash、讀寫檔案或其他工具；它只驗證 Python 透過 JSONL 與常駐 Pi RPC 溝通的成本。日後第二階段才會顯式加入唯一的受控網路工具。
+baseline 固定使用 `openai-codex/gpt-5.6-luna`、`thinking off`，並傳入 `--no-session --no-builtin-tools --no-extensions --no-skills --no-prompt-templates --no-context-files`。因此預設沒有網路、bash、讀寫檔案或其他工具；它只驗證 Python 透過 JSONL 與常駐 Pi RPC 溝通的成本。
+
+第二階段可明確加上唯一的自製公開網頁工具：
+
+```bash
+python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；只用 web_fetch 取得公開資料，並用兩句繁體中文回答。"
+```
+
+`--web-fetch` 仍會停用所有 Pi built-in tools、skills、prompt templates、context files 與自動發現的 extension；只以明確路徑載入 `pi_extensions/aiy_web_fetch.ts` 的 `web_fetch`。它不使用網域白名單，但只接受公開的 HTTP(S) 位址，會拒絕 localhost、私有／保留 IP、內網 DNS 結果、含帳密 URL、非標準連接埠及所有重新導向到這些目標的請求。每次查詢總逾時 8 秒、最多 3 次重新導向、最多讀取 24 KiB 並回傳 6,000 個字元的純文字；這既限制 context 用量，也讓網頁中的提示注入內容只作不可信資料處理。它是 `web_fetch`，不是 web search：模型必須選擇可公開存取的來源網址。
 
 ## 本機設定與安全
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
@@ -92,6 +100,7 @@ baseline 固定使用 `openai-codex/gpt-5.6-luna`、`thinking off`，並傳入 `
 - `~/aiy-voice/`：專案程式與 README
 - `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
 - `~/aiy-voice/pi_rpc_baseline.py`：不接 GPIO 的 Pi RPC 常駐效能測試
+- `~/aiy-voice/pi_extensions/aiy_web_fetch.ts`：Pi 唯一可選的受控公開網頁工具
 - `~/aiy-voice/run-button-daemon.sh`：systemd 使用的 daemon 啟動器
 - `~/run-echo.sh`：本機錄音 Echo 的手動硬體測試入口
 - `~/run-shutdown-guard.sh`：功能 B 手動測試入口
