@@ -404,6 +404,40 @@ class PiVoiceAssistant:
             },
         )
 
+    def prewarm(self) -> None:
+        """Start Pi while recording, before ASR has the text to send.
+
+        This is deliberately asynchronous: GPIO handling and the start beep
+        must never wait for the Pi launcher. A generation check prevents a
+        cancelled recording from leaving a newly-created idle process behind.
+        """
+        with self._state_lock:
+            if self._client is not None:
+                return
+            expected_generation = self._generation
+
+        def start_prewarm() -> None:
+            config_error = pi_config_error()
+            if config_error:
+                print(f"[pi] prewarm skipped: {config_error}")
+                return
+
+            with self._request_lock:
+                with self._state_lock:
+                    if (
+                        self._generation != expected_generation
+                        or self._client is not None
+                    ):
+                        return
+                    self._client = self._start_client_locked()
+                    print(f"[pi] session prewarmed while recording ({PI_MODEL})")
+
+        threading.Thread(
+            target=start_prewarm,
+            name="aiy-pi-rpc-prewarm",
+            daemon=True,
+        ).start()
+
     def ask(self, transcript: str) -> PromptResult:
         """Send one ASR result through the currently valid Pi session."""
         config_error = pi_config_error()
@@ -635,8 +669,7 @@ def run_voice_loop(
     except Exception as exc:
         delete_file(temporary_reply_path)
         delete_file(reply_path)
-        if agent_turn:
-            assistant.discard_unheard_turn()
+        assistant.discard_unheard_turn()
         results.put(VoiceLoopResult(job_id=job_id, error=str(exc)))
     finally:
         delete_file(wav_path)
@@ -887,9 +920,11 @@ def main() -> int:
             except OSError as exc:
                 network_pending = False
                 network_error = f"could not start voice request: {exc}"
+                assistant.discard_unheard_turn()
                 print(f"[voice] request failed: {network_error}")
         else:
             print("[warn] no valid audio recorded")
+            assistant.discard_unheard_turn()
             led.set(False)
 
     def trigger_auxiliary_volume() -> None:
@@ -1160,6 +1195,7 @@ def main() -> int:
                         )
                         recording = True
                         recording_started_at = time.monotonic()
+                        assistant.prewarm()
                     else:
                         finish_recording("button")
 
