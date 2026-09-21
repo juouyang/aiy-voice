@@ -9,6 +9,121 @@
 
 功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字交由內網 T450 的 OpenCode HTTP server 產生回覆，並以短期對話、固定家庭背景與即時本機時間補足上下文，再交由 Mac TTS 播放。
 
+## Quick Start
+
+這份快速開始的目標是讓 **Google AIY Voice Kit V1／Voice HAT 接在 Raspberry Pi 3B** 的裝置先完成錄音 Echo，再接上自己的 ASR/TTS 服務。它已在 Debian 13（Raspberry Pi OS 相容環境）驗證；不同聲卡、GPIO 配線或 AIY 硬體版本需要自行調整裝置設定。
+
+本專案不會在 Pi 本機執行 ASR、TTS 或大型模型。完整模式需要一個可從 Pi 存取、OpenAI API 相容的 ASR/TTS endpoint；OpenCode AI 回覆則是可選的第二台私有主機。
+
+### 1. 安裝系統工具並 clone
+
+以下命令以一般使用者執行，並假設該使用者可以使用 `sudo`：
+
+```bash
+sudo apt update
+sudo apt install -y git python3-venv alsa-utils gpiod curl nano
+git clone https://github.com/juouyang/aiy-voice.git ~/aiy-voice
+cd ~/aiy-voice
+python3 -m venv ~/.venvs/aiy
+```
+
+Python runtime 只使用標準函式庫，因此不需要安裝 Python 套件。先確認 AIY 硬體可被系統看到：
+
+```bash
+arecord -l
+aplay -l
+gpioinfo gpiochip0
+```
+
+輸出應包含 Google Voice HAT 的聲卡與可用 GPIO chip。若 `gpioset` 權限被拒絕，將目前使用者加入系統的 `gpio` 群組後重新登入或重開機：
+
+```bash
+sudo usermod -aG gpio "$USER"
+```
+
+### 2. 先驗證本機硬體 Echo
+
+這一步不需要網路 API。執行後，短按開始錄音、再短按停止並回放；以 `Ctrl-C` 結束：
+
+```bash
+~/aiy-voice/run-echo.sh
+```
+
+若 Echo 未成功，先處理聲卡、麥克風、喇叭或 GPIO 問題，不要繼續設定網路服務。
+
+### 3. 設定 ASR/TTS endpoint
+
+準備一個 AIY 可達的 OpenAI API 相容服務，至少提供 `/v1/audio/transcriptions` 與 `/v1/audio/speech`。複製範例、填入 endpoint、金鑰與實際模型名稱：
+
+```bash
+install -d -m 700 ~/.config/aiy-voice
+cp ~/aiy-voice/examples/omlx.env.example ~/.config/aiy-voice/omlx.env
+chmod 600 ~/.config/aiy-voice/omlx.env
+nano ~/.config/aiy-voice/omlx.env
+```
+
+可先確認 API 可達；此命令不會輸出金鑰：
+
+```bash
+set -a; . ~/.config/aiy-voice/omlx.env; set +a
+curl -fsS "$OMLX_BASE_URL/v1/models" -H "Authorization: Bearer $OMLX_API_KEY" >/dev/null && echo 'ASR/TTS API reachable'
+```
+
+只設定此檔案時，按鈕流程會在 Echo 後播放 ASR 確認語音。TTS 預設為單一聲線；若想讓每輪動態回覆隨機選聲線，設定 `AIY_OMLX_TTS_VOICES`，例如 `Vivian,Ono_Anna`。固定提示音與 Echo 不會受這項設定影響。
+
+### 4. 可選：加入 OpenCode AI 回覆
+
+若已有一台可信內網主機正在運行並受密碼保護的 OpenCode HTTP server，可設定它來把 ASR 文字轉成 AI 回覆：
+
+```bash
+cp ~/aiy-voice/examples/opencode.env.example ~/.config/aiy-voice/opencode.env
+chmod 600 ~/.config/aiy-voice/opencode.env
+nano ~/.config/aiy-voice/opencode.env
+```
+
+OpenCode server 的 OAuth 登入、LAN 綁定與密碼部署不在這份 Quick Start 的範圍內；未設定或暫時不可達時，裝置仍保留 ASR 確認語音，不會中斷 Echo。
+
+固定家庭背景也是可選項：
+
+```bash
+cp ~/aiy-voice/examples/assistant-profile.md.example ~/.config/aiy-voice/assistant-profile.md
+chmod 600 ~/.config/aiy-voice/assistant-profile.md
+nano ~/.config/aiy-voice/assistant-profile.md
+```
+
+### 5. 安裝唯一的 GPIO daemon
+
+service 範本中的帳號與路徑是參考部署值，必須在安裝時替換成目前使用者與 clone 路徑。請在 repository 根目錄執行：
+
+```bash
+cd ~/aiy-voice
+project_dir="$PWD"
+service_user="$(id -un)"
+service_group="$(id -gn)"
+sed \
+  -e "s|^User=ju$|User=${service_user}|" \
+  -e "s|^Group=ju$|Group=${service_group}|" \
+  -e "s|^WorkingDirectory=/home/ju/aiy-voice$|WorkingDirectory=${project_dir}|" \
+  -e "s|^ExecStart=/home/ju/aiy-voice/run-button-daemon.sh$|ExecStart=${project_dir}/run-button-daemon.sh|" \
+  systemd/aiy-button-daemon.service | \
+  sudo tee /etc/systemd/system/aiy-button-daemon.service >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now aiy-button-daemon.service
+sudo systemctl status aiy-button-daemon.service
+```
+
+功能 B 的長按關機需要 service 使用者可以執行**唯一指定的**關機命令。若要啟用這項功能，以 `sudo visudo -f /etc/sudoers.d/aiy-button-daemon` 建立檔案，加入下列一行，將 `<your-user>` 改成實際帳號：
+
+```text
+<your-user> ALL=(root) NOPASSWD: /sbin/shutdown -h now
+```
+
+完成後，先做一次完整的「短按錄音 → 再短按 → Echo → ASR/TTS」測試。查看執行 log：
+
+```bash
+journalctl -u aiy-button-daemon.service -f
+```
+
 ## 常駐按鈕行為
 
 短按定義為按下後在 1.2 秒內放開：
@@ -112,6 +227,7 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 - `~/aiy-voice/`：專案程式與 README
 - `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
 - `~/aiy-voice/opencode_voice.py`：不含第三方套件的 OpenCode HTTP session client
+- `~/aiy-voice/examples/omlx.env.example`：AIY 連向私有 ASR/TTS API 的設定範例
 - `~/aiy-voice/examples/opencode.env.example`：AIY 連向私有 OpenCode server 的設定範例
 - `~/aiy-voice/pi_rpc_baseline.py`：不接 GPIO 的 Pi RPC 常駐效能測試
 - `~/aiy-voice/pi_extensions/aiy_web_fetch.ts`：Pi 唯一可選的受控公開網頁工具

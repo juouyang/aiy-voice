@@ -20,5 +20,6 @@ if test -r "$opencode_env_file"; then
   source "$opencode_env_file"
   set +a
 fi
-project_dir="${AIY_PROJECT_DIR:-$HOME/aiy-voice}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="${AIY_PROJECT_DIR:-$script_dir}"
 exec "$HOME/.venvs/aiy/bin/python" -u "$project_dir/aiy_button_daemon.py"
