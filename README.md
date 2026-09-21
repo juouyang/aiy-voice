@@ -63,7 +63,7 @@ daemon 在第一次短按、開始錄音時背景建立一個遠端 OpenCode ses
 
 daemon 只在私有 `~/.local/state/aiy-voice/opencode-sessions.json` 保存尚待清理的 opaque session ID，權限為 `600`，從不寫入對話內容或家庭背景。service 重啟後會先刪除其中殘留的 server session，再開始新的語音對話。
 
-每次 HTTP prompt 都明確關閉 OpenCode 所有內建工具：bash、讀寫檔案、glob、grep、task、skills、webfetch、websearch 等。因此目前 agent 沒有網路查詢或裝置控制能力；它只負責理解對話並產生短文字回覆。這層限制不會取代 OpenCode server HTTP API 的網路邊界，server 仍應只繫結在受信任的私有 LAN 並啟用密碼。
+每次 HTTP prompt 只開放 OpenCode 的 `websearch` 與 `webfetch`，由模型依問題自行決定是否查詢公開網路；一般聊天不必查網。bash、讀寫檔案、glob、grep、task、skills、GPIO 與其他內建能力皆明確關閉。沒有網站白名單，但 system prompt 規定不可探測 localhost、私有 IP、內網主機、帳密 URL 或非公開服務，並把網頁內容視為不可信資料。網路答案可能出錯；回答只朗讀結論與來源名稱，不朗讀網址。這層 agent 限制不會取代 OpenCode server HTTP API 的網路邊界，server 仍應只繫結在受信任的私有 LAN 並啟用密碼。
 
 ## Pi RPC 手動 baseline
 

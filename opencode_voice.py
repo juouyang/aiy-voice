@@ -308,7 +308,9 @@ class OpenCodeVoiceAssistant:
             daemon=True,
         ).start()
 
-    def ask(self, prompt: str, system_prompt: str) -> OpenCodePromptResult:
+    def ask(
+        self, prompt: str, system_prompt: str, *, enable_web: bool = True
+    ) -> OpenCodePromptResult:
         """Send one ASR prompt and wait for its complete text response."""
         if not prompt.strip():
             raise OpenCodeError("OpenCode prompt must not be empty")
@@ -328,6 +330,9 @@ class OpenCodeVoiceAssistant:
                 self._active_requests += 1
             started = time.monotonic()
             try:
+                tool_permissions = {tool_id: False for tool_id in BUILTIN_TOOL_IDS}
+                if enable_web:
+                    tool_permissions.update({"webfetch": True, "websearch": True})
                 result = self._request_json(
                     "POST",
                     f"/session/{urllib.parse.quote(session_id, safe='')}/message",
@@ -337,7 +342,7 @@ class OpenCodeVoiceAssistant:
                             "modelID": self._model_id,
                         },
                         "system": system_prompt,
-                        "tools": {tool_id: False for tool_id in BUILTIN_TOOL_IDS},
+                        "tools": tool_permissions,
                         "parts": [{"type": "text", "text": prompt}],
                     },
                 )
