@@ -4,6 +4,7 @@
 import json
 import os
 import queue
+import random
 import shutil
 import signal
 import subprocess
@@ -73,6 +74,11 @@ OMLX_TTS_MODEL = os.getenv(
     "AIY_OMLX_TTS_MODEL", "Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
 )
 OMLX_TTS_VOICE = os.getenv("AIY_OMLX_TTS_VOICE", "Uncle_Fu")
+OMLX_TTS_VOICES = tuple(
+    voice.strip()
+    for voice in os.getenv("AIY_OMLX_TTS_VOICES", "").split(",")
+    if voice.strip()
+) or (OMLX_TTS_VOICE,)
 OMLX_TTS_LANGUAGE = os.getenv("AIY_OMLX_TTS_LANGUAGE", "Chinese")
 OMLX_TTS_INSTRUCTIONS = os.getenv("AIY_OMLX_TTS_INSTRUCTIONS", "越清楚越好。")
 OMLX_TTS_PREFIX = os.getenv("AIY_OMLX_TTS_PREFIX", "你剛剛說：")
@@ -528,11 +534,13 @@ def run_voice_loop(
                 f"settled={agent_result.elapsed_ms} ms, web tools available)"
             )
         start_ntfy_voice_notification(job_id, transcript, ai_reply)
+        tts_voice = random.choice(OMLX_TTS_VOICES)
+        print(f"[tts] selected voice: {tts_voice}")
         tts_request = json.dumps(
             {
                 "model": OMLX_TTS_MODEL,
                 "input": tts_input,
-                "voice": OMLX_TTS_VOICE,
+                "voice": tts_voice,
                 "language": OMLX_TTS_LANGUAGE,
                 "instructions": OMLX_TTS_INSTRUCTIONS,
                 "speed": 1.0,
