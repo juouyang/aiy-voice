@@ -7,7 +7,7 @@
 2. 功能 B：長按安全關機（10 秒警告，12 秒關機）
 3. 輔助手勢：切換所有 daemon 聲音的三段輸出音量
 
-功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字交由 daemon 常駐的 Pi RPC session 產生回覆，並以短期對話、固定家庭背景與即時本機時間補足上下文，再交由 Mac TTS 播放。
+功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字交由內網 T450 的 OpenCode HTTP server 產生回覆，並以短期對話、固定家庭背景與即時本機時間補足上下文，再交由 Mac TTS 播放。
 
 ## 常駐按鈕行為
 
@@ -18,11 +18,11 @@
 | 待命 | — | LED 熄滅 | 等待第一次短按 |
 | 開始錄音 | 第一次短按 | LED 常亮、上行提示音 | 開始收音 |
 | 錄音中 | 說話 | LED 持續常亮 | 持續錄音 |
-| 停止並確認 | 第二次短按 | 下行提示音、LED 閃爍 | 立即播放原始錄音；背景呼叫 Mac ASR、Pi RPC 與 Mac TTS |
-| 錄音時間上限 | 錄音達 45 秒 | 下行提示音、LED 閃爍 | 自動停止錄音，接續原始錄音 Echo、ASR、Pi RPC 與 TTS |
+| 停止並確認 | 第二次短按 | 下行提示音、LED 閃爍 | 立即播放原始錄音；背景呼叫 Mac ASR、OpenCode 與 Mac TTS |
+| 錄音時間上限 | 錄音達 45 秒 | 下行提示音、LED 閃爍 | 自動停止錄音，接續原始錄音 Echo、ASR、OpenCode 與 TTS |
 | 語音確認 | 原始錄音播放完 | LED 持續閃爍 | 播放 Mac TTS 產生的簡短 AI 回覆 |
 | 本機短期記憶 | AI 回覆完整播放完畢 | 無額外聲光提示 | 記住本輪問答，供接下來 3 分鐘內的後續對話理解上下文 |
-| 固定家庭背景與時間 | 每個 Pi session／每次提問 | 無額外聲光提示 | 載入管理者設定的家庭背景，並附入 Asia/Taipei 即時時間；不會自行寫入新資料 |
+| 固定家庭背景與時間 | 每個 OpenCode session／每次提問 | 無額外聲光提示 | 載入管理者設定的家庭背景，並附入 Asia/Taipei 即時時間；不會自行寫入新資料 |
 | 取消語音本輪 | Echo 回放、網路處理或最終 TTS WAV 播放中短按一次 | 立即停止目前聲音、取消提示音、LED 熄滅 | 捨棄本輪後續回覆並回待命；下一次短按才開始新錄音 |
 | 回到待命 | TTS 播放結束 | LED 熄滅 | 可開始下一輪 |
 | 輔助手勢準備 | 待命時按住滿約 1.5 秒 | LED 常亮、以目前音量播放 TTS 提示「現在可放開」 | 聽到後放開；未進入 10 秒關機警告前都有效 |
@@ -34,7 +34,7 @@
 
 若在「現在可放開」的句尾就已按下確認短按，daemon 也會記住該次操作，並在提示音完成後切換音量；不需要精準抓住 LED 雙閃才按。
 
-若 Mac mini 不可達、API 驗證失敗或逾時，原始錄音仍會播完；daemon 隨後播放失敗提示音並回到待命。若 Pi 未安裝、OAuth 未登入或暫時失敗，則維持原有的「你剛剛說：……」ASR 確認語音。錄音、處理音檔與 TTS 回應僅存於 `/tmp`，在完成或失敗後清除。
+若 Mac mini 不可達、API 驗證失敗或逾時，原始錄音仍會播完；daemon 隨後播放失敗提示音並回到待命。若 OpenCode server 未啟動、OAuth 未登入或暫時失敗，則維持原有的「你剛剛說：……」ASR 確認語音。錄音、處理音檔與 TTS 回應僅存於 `/tmp`，在完成或失敗後清除。
 
 ## 唯一 systemd 服務
 
@@ -55,13 +55,15 @@
 
 測試功能 B 時，10 秒會播放警告音；若只想確認警告，請在 12 秒前放開按鈕以取消關機。
 
-## Pi RPC agent
+## OpenCode agent
 
-daemon 會在 ASR 完成後延後啟動一個 Pi RPC process，並將辨識文字送給 `openai-codex/gpt-5.6-luna`。這取代原本 daemon 直接呼叫 OpenAI Responses API 的路徑；Mac mini 仍只負責 ASR/TTS。Pi 使用既有的 ChatGPT Codex OAuth，不需要、也不讀取 OpenAI API key。
+T450 上常駐的 OpenCode HTTP server 使用自己的 OpenAI OAuth；AIY daemon 只透過內網 HTTP Basic Auth 呼叫它，預設模型為 `openai/gpt-5.6-luna-fast`。這取代 daemon 直接呼叫 OpenAI API 與 Raspberry Pi 本機 Pi RPC 的路徑；Mac mini 仍只負責 ASR/TTS，AIY 也不需要 OpenAI API key 或 OAuth credential。
 
-同一個 Pi process 只保留目前短期對話於記憶體，且不寫 session 檔。最終 TTS 完整播放後才算一輪；預設滿 3 輪、閒置 3 分鐘、按鈕取消、關機流程、Pi 失敗或 TTS 無法播放時都會關閉 process 並清除對話。每個新 session 會載入私有的固定家庭背景；更新該檔後，請重啟 service 或等 session 清除後再使用。
+daemon 在第一次短按、開始錄音時背景建立一個遠端 OpenCode session，避免 Echo 結束後才承擔建立 session 的等待。最終 TTS 完整播放後才保留這一輪對話；閒置 3 分鐘、按鈕取消、關機流程、agent 失敗或 TTS 無法播放時，都會 abort 並刪除 server-side session。`AIY_MEMORY_MAX_TURNS` 保留為相容參數，但預設 `0` 表示不限制輪數；三分鐘閒置才是新 session 的正式邊界。
 
-Pi 只提供受控的 `web_fetch`：沒有 bash、讀寫檔案、GPIO、MCP、skills 或其他 Pi built-in tools。它可讀取不受網域白名單限制的公開 HTTP(S) 網頁，但拒絕本機／私有網路與其他不安全目標。
+daemon 只在私有 `~/.local/state/aiy-voice/opencode-sessions.json` 保存尚待清理的 opaque session ID，權限為 `600`，從不寫入對話內容或家庭背景。service 重啟後會先刪除其中殘留的 server session，再開始新的語音對話。
+
+每次 HTTP prompt 都明確關閉 OpenCode 所有內建工具：bash、讀寫檔案、glob、grep、task、skills、webfetch、websearch 等。因此目前 agent 沒有網路查詢或裝置控制能力；它只負責理解對話並產生短文字回覆。這層限制不會取代 OpenCode server HTTP API 的網路邊界，server 仍應只繫結在受信任的私有 LAN 並啟用密碼。
 
 ## Pi RPC 手動 baseline
 
@@ -93,11 +95,12 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。
-- daemon 不再讀取 `~/.config/aiy-voice/openai.env` 或呼叫 OpenAI API；可保留該私有檔案供其他用途，但它不影響本服務。Pi 會使用既有 ChatGPT Codex OAuth；請勿把 OAuth credential 複製進 repository 或環境檔。
-- Pi 以 `AIY_PI_MODEL`（預設 `openai-codex/gpt-5.6-luna`）、`AIY_PI_TIMEOUT_SEC`（預設 45 秒）、`AIY_PI_MAX_INPUT_CHARS`（600）與 `AIY_PI_MAX_REPLY_CHARS`（120）控制 agent。短期記憶只在 Pi process 記憶體，並以 `AIY_MEMORY_WINDOW_SEC`（180 秒）和 `AIY_MEMORY_MAX_TURNS`（3）清除；不再把歷史問答重送到另一個 API。
-- daemon 每次送 Pi 前，以 `AIY_ASSISTANT_TIMEZONE`（預設 `Asia/Taipei`）取得裝置目前時間，供模型回答時間與日期問題；這不是模型自行推測的時間。
-- 固定家庭背景放在裝置私有的 `~/.config/aiy-voice/assistant-profile.md`，每個新 Pi session 由受控 extension 載入一次，最多 1,200 個字元；內容不放進 Pi 命令列。適合放裝置地點與共享使用情境；不可提交到 repository。請從 [範例](examples/assistant-profile.md.example) 複製後填入裝置專屬內容。這份檔案不是模型的可寫長期記憶，模型不會自行新增或修改其中資料，也不可僅根據聲音猜測目前使用者身份。
-- 若存在 `~/.config/aiy-voice/ntfy.env`，daemon 會使用其中的 `NTFY_BASE_URL` 與 `NTFY_TOPIC`，在 Pi 回覆後背景傳送同一則「你說：ASR 文字／AI：回覆」通知。通知不使用 token，失敗只記錄 log，絕不延遲或中斷 Echo／TTS；若 Pi 失敗，則只傳 ASR 文字。
+- daemon 不再讀取 `~/.config/aiy-voice/openai.env` 或直接呼叫 OpenAI API；可保留該私有檔案供其他用途，但它不影響本服務。OpenCode server 使用自己的 ChatGPT/OpenAI OAuth；請勿把 OAuth credential 複製進 repository 或 AIY 環境檔。
+- daemon 從私有 `~/.config/aiy-voice/opencode.env` 載入 T450 server URL、Basic Auth credential 與模型設定。請從 [範例](examples/opencode.env.example) 複製後填入真實值，檔案權限設為 `600`；不可提交。預設使用 `AIY_OPENCODE_MODEL=openai/gpt-5.6-luna-fast`、`AIY_OPENCODE_TIMEOUT_SEC=45`、`AIY_AGENT_MAX_INPUT_CHARS=600` 與 `AIY_AGENT_MAX_REPLY_CHARS=120`。
+- `AIY_MEMORY_WINDOW_SEC` 預設為 180 秒，是 session 的正式閒置邊界。`AIY_MEMORY_MAX_TURNS=0` 預設停用舊版三輪上限；若日後需要相容行為，設為正整數即可。
+- daemon 每次送 OpenCode 前，以 `AIY_ASSISTANT_TIMEZONE`（預設 `Asia/Taipei`）取得裝置目前時間，作為可信 system context；這不是模型自行推測的時間。
+- 固定家庭背景放在裝置私有的 `~/.config/aiy-voice/assistant-profile.md`，每次 agent prompt 以 trusted system context 附入，最多 1,200 個字元。適合放裝置地點與共享使用情境；不可提交。請從 [範例](examples/assistant-profile.md.example) 複製後填入裝置專屬內容。這份檔案不是模型的可寫長期記憶，模型不會自行新增或修改其中資料，也不可僅根據聲音猜測目前使用者身份。
+- 若存在 `~/.config/aiy-voice/ntfy.env`，daemon 會使用其中的 `NTFY_BASE_URL` 與 `NTFY_TOPIC`，在 OpenCode 回覆後背景傳送同一則「你說：ASR 文字／AI：回覆」通知。通知不使用 token，失敗只記錄 log，絕不延遲或中斷 Echo／TTS；若 agent 失敗，則只傳 ASR 文字。
 - 輔助手勢的預先生成 TTS 提示音及音量公告存放於 `assets/gain/{quiet,normal,loud}/`，隨專案版本追蹤。各目錄的固定 gain 分別為安靜 0.35×、標準 0.65×、大聲 1.00×，因此裝置播放時不必重新計算。
 - 選取的輸出音量只寫入裝置本機的 `~/.config/aiy-voice/output-volume.env`，並在 daemon 重啟後保留；首次安裝預設為大聲，與原先已驗證的音量相同。
 - 音量 profile 套用於固定提示音、錄音 Echo 回放、Mac TTS 回應、一般 beep 與關機提示。動態 WAV 會在 `/tmp` 建立一次縮放版本並在播放後清除。
@@ -108,9 +111,11 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 ## 專案結構
 - `~/aiy-voice/`：專案程式與 README
 - `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
+- `~/aiy-voice/opencode_voice.py`：不含第三方套件的 OpenCode HTTP session client
+- `~/aiy-voice/examples/opencode.env.example`：AIY 連向私有 OpenCode server 的設定範例
 - `~/aiy-voice/pi_rpc_baseline.py`：不接 GPIO 的 Pi RPC 常駐效能測試
 - `~/aiy-voice/pi_extensions/aiy_web_fetch.ts`：Pi 唯一可選的受控公開網頁工具
-- `~/aiy-voice/pi_extensions/aiy_voice_context.ts`：受控載入私有固定背景；它不是模型可呼叫工具
+- `~/aiy-voice/pi_extensions/aiy_voice_context.ts`：Pi 手動 baseline 可用的私有固定背景載入器
 - `~/aiy-voice/run-button-daemon.sh`：systemd 使用的 daemon 啟動器
 - `~/run-echo.sh`：本機錄音 Echo 的手動硬體測試入口
 - `~/run-shutdown-guard.sh`：功能 B 手動測試入口
