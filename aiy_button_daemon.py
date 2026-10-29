@@ -110,10 +110,13 @@ ASSISTANT_PROFILE_MAX_CHARS = int(
     os.getenv("AIY_ASSISTANT_PROFILE_MAX_CHARS", "1200")
 )
 ASSISTANT_TIMEZONE = os.getenv("AIY_ASSISTANT_TIMEZONE", "Asia/Taipei")
+ASSISTANT_NAME = os.getenv("AIY_ASSISTANT_NAME", "AIY Voice").strip()[:40] or "AIY Voice"
 AGENT_INSTRUCTIONS = os.getenv(
     "AIY_AGENT_INSTRUCTIONS",
     (
-        "你是 AIY Voice，一位親切、清楚的家庭語音助理。"
+        f"你是{ASSISTANT_NAME}，一位親切、清楚的家庭語音助理。"
+        f"當使用者詢問你的名字、身份或『你是誰』時，直接自稱『{ASSISTANT_NAME}』；"
+        "不要自稱為 AIY 或把技術名稱逐字念出來。"
         "近期對話若有提供，只用來理解代詞或延續主題；若無關，以目前問題為主。"
         "這是共享的家庭裝置；不可只根據聲音或語句猜測目前使用者的身份。"
         "使用繁體中文，不要 Markdown、標題或清單。"
