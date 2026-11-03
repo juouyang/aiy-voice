@@ -6,6 +6,7 @@ import os
 import queue
 import shutil
 import signal
+import struct
 import subprocess
 import threading
 import time
@@ -351,6 +352,44 @@ def post_tts(body: bytes) -> bytes:
         ) from exc
 
 
+def repair_streaming_wav_length(audio: bytes) -> bytes:
+    """Repair an oversized streaming WAV data length before local processing.
+
+    BreezyVoice streams valid PCM bytes but currently uses ``0xffffffff`` for
+    the RIFF and data chunk lengths.  ALSA can often play it directly, but the
+    standard WAV reader treats it as billions of samples, which prevents our
+    output-gain step from running.  Only repair a data chunk whose declared
+    size extends beyond the actual response; ordinary WAV files are unchanged.
+    """
+    if len(audio) < 20 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+        return audio
+
+    offset = 12
+    while offset + 8 <= len(audio):
+        chunk_id = audio[offset : offset + 4]
+        declared_size = struct.unpack_from("<I", audio, offset + 4)[0]
+        data_offset = offset + 8
+        if chunk_id == b"data":
+            actual_size = len(audio) - data_offset
+            if declared_size <= actual_size:
+                return audio
+            repaired = bytearray(audio)
+            struct.pack_into("<I", repaired, 4, len(audio) - 8)
+            struct.pack_into("<I", repaired, offset + 4, actual_size)
+            print(
+                "[tts] repaired streaming WAV length header "
+                f"({declared_size} -> {actual_size} bytes)"
+            )
+            return bytes(repaired)
+
+        next_offset = data_offset + declared_size + (declared_size % 2)
+        if next_offset > len(audio):
+            return audio
+        offset = next_offset
+
+    return audio
+
+
 def parse_opencode_model() -> tuple[str, str] | None:
     provider_id, separator, model_id = OPENCODE_MODEL.partition("/")
     if not separator or not provider_id or not model_id or "/" in model_id:
@@ -619,7 +658,7 @@ def run_voice_loop(
             },
             ensure_ascii=False,
         ).encode()
-        audio = post_tts(tts_request)
+        audio = repair_streaming_wav_length(post_tts(tts_request))
         if len(audio) <= 44 or audio[:4] != b"RIFF":
             raise RuntimeError("TTS did not return a WAV file")
 
