@@ -2,7 +2,6 @@
 """Single-owner AIY button daemon for network voice confirmation and shutdown."""
 
 import json
-import io
 import os
 import queue
 import shutil
@@ -86,7 +85,6 @@ TTS_NORMALIZATION_TARGET_PEAK = float(
 TTS_NORMALIZATION_MAX_GAIN = float(
     os.getenv("AIY_TTS_NORMALIZATION_MAX_GAIN", "8")
 )
-TTS_WAV_MAX_ATTEMPTS = int(os.getenv("AIY_TTS_WAV_MAX_ATTEMPTS", "2"))
 TTS_ASR_CONFIRMATION_PREFIX = os.getenv(
     "AIY_TTS_ASR_CONFIRMATION_PREFIX",
     os.getenv("AIY_OMLX_TTS_PREFIX", "你剛剛說："),
@@ -299,8 +297,6 @@ def tts_config_error() -> str | None:
         return "AIY_TTS_NORMALIZATION_TARGET_PEAK must be between 0 and 1"
     if TTS_NORMALIZATION_MAX_GAIN < 1:
         return "AIY_TTS_NORMALIZATION_MAX_GAIN must be at least 1"
-    if TTS_WAV_MAX_ATTEMPTS < 1:
-        return "AIY_TTS_WAV_MAX_ATTEMPTS must be positive"
     return None
 
 
@@ -404,72 +400,6 @@ def repair_streaming_wav_length(audio: bytes) -> bytes:
     return audio
 
 
-def pcm16_percentile(samples: tuple[int, ...], percentile: int) -> int:
-    """Return an absolute PCM16 percentile without sorting a full response."""
-    if not samples:
-        return 0
-    histogram = [0] * 32768
-    for sample in samples:
-        histogram[min(abs(sample), 32767)] += 1
-    percentile_rank = max(1, (len(samples) * percentile + 99) // 100)
-    seen = 0
-    for amplitude, count in enumerate(histogram):
-        seen += count
-        if seen >= percentile_rank:
-            return amplitude
-    return 32767
-
-
-def validate_breezyvoice_wav(audio: bytes) -> None:
-    """Reject intermittent empty or saturated outputs before they reach ALSA."""
-    try:
-        with wave.open(io.BytesIO(audio), "rb") as reader:
-            params = reader.getparams()
-            frames = reader.readframes(params.nframes)
-    except (EOFError, OSError, wave.Error) as exc:
-        raise ValueError(f"invalid WAV container: {exc}") from exc
-    if (
-        params.comptype != "NONE"
-        or params.nchannels != 1
-        or params.sampwidth != 2
-        or params.framerate != 24000
-    ):
-        raise ValueError(
-            "unexpected WAV format "
-            f"(channels={params.nchannels}, width={params.sampwidth}, "
-            f"rate={params.framerate}, compression={params.comptype})"
-        )
-    samples = struct.unpack("<" + "h" * (len(frames) // 2), frames)
-    p99 = pcm16_percentile(samples, 99) / 32767
-    if p99 < 0.01:
-        raise ValueError(f"near-silent audio (p99={p99:.3%})")
-    if p99 > 0.90:
-        raise ValueError(f"saturated audio (p99={p99:.3%})")
-
-
-def request_breezyvoice_wav(body: bytes) -> bytes:
-    """Fetch a playable BreezyVoice WAV, retrying only invalid audio output."""
-    last_error: ValueError | None = None
-    for attempt in range(1, TTS_WAV_MAX_ATTEMPTS + 1):
-        audio = repair_streaming_wav_length(post_tts(body))
-        try:
-            validate_breezyvoice_wav(audio)
-        except ValueError as exc:
-            last_error = exc
-            print(
-                f"[tts] rejected BreezyVoice WAV "
-                f"(attempt {attempt}/{TTS_WAV_MAX_ATTEMPTS}): {exc}"
-            )
-            continue
-        if attempt > 1:
-            print(f"[tts] BreezyVoice WAV recovered on attempt {attempt}")
-        return audio
-    raise RuntimeError(
-        "BreezyVoice TTS returned invalid audio after "
-        f"{TTS_WAV_MAX_ATTEMPTS} attempts: {last_error}"
-    )
-
-
 def normalize_tts_wav_for_playback(src: Path, dst: Path, output_gain: float) -> None:
     """Apply bounded level normalization to BreezyVoice PCM16 before playback.
 
@@ -488,7 +418,17 @@ def normalize_tts_wav_for_playback(src: Path, dst: Path, output_gain: float) -> 
     if not samples:
         raise ValueError("TTS WAV contains no samples")
 
-    reference = pcm16_percentile(samples, 99)
+    histogram = [0] * 32768
+    for sample in samples:
+        histogram[min(abs(sample), 32767)] += 1
+    percentile_rank = max(1, (len(samples) * 99 + 99) // 100)
+    seen = 0
+    reference = 0
+    for amplitude, count in enumerate(histogram):
+        seen += count
+        if seen >= percentile_rank:
+            reference = amplitude
+            break
 
     if reference == 0:
         auto_gain = 1.0
@@ -788,7 +728,7 @@ def run_voice_loop(
             },
             ensure_ascii=False,
         ).encode()
-        audio = request_breezyvoice_wav(tts_request)
+        audio = repair_streaming_wav_length(post_tts(tts_request))
         if len(audio) <= 44 or audio[:4] != b"RIFF":
             raise RuntimeError("TTS did not return a WAV file")
 
