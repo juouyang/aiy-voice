@@ -70,7 +70,7 @@ curl -fsS "$OMLX_BASE_URL/v1/models" -H "Authorization: Bearer $OMLX_API_KEY" >/
 curl -fsS "${AIY_TTS_SPEECH_URL%/v1/audio/speech}/health" >/dev/null && echo 'BreezyVoice TTS API reachable'
 ```
 
-只設定此檔案時，按鈕流程會在 Echo 後播放 ASR 確認語音。BreezyVoice 的動態 TTS 預設為 `zh_female`，並以完整的 `AIY_TTS_SPEECH_URL`、`AIY_TTS_API_KEY`、`AIY_TTS_MODEL` 與 `AIY_TTS_VOICE` 設定；timeout 必須至少 120 秒。固定提示音與 Echo 不會受這項設定影響。daemon 會序列化動態 TTS 請求，配合單工的 BreezyVoice 服務。
+只設定此檔案時，按鈕流程會在 Echo 後播放 ASR 確認語音。BreezyVoice 的動態 TTS 預設為 `zh_female`，並以完整的 `AIY_TTS_SPEECH_URL`、`AIY_TTS_API_KEY`、`AIY_TTS_MODEL` 與 `AIY_TTS_VOICE` 設定；timeout 必須至少 120 秒。對於低平均音量但偶有尖峰的 BreezyVoice PCM16 WAV，daemon 會以第 99 百分位做受限正規化；可用 `AIY_TTS_NORMALIZATION_TARGET_PEAK`（預設 0.60）與 `AIY_TTS_NORMALIZATION_MAX_GAIN`（預設 8）調整。固定提示音與 Echo 不會受這項設定影響。daemon 會序列化動態 TTS 請求，配合單工的 BreezyVoice 服務。
 
 ### 4. 可選：加入 OpenCode AI 回覆
 
