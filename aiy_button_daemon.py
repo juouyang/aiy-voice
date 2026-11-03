@@ -4,7 +4,6 @@
 import json
 import os
 import queue
-import random
 import shutil
 import signal
 import subprocess
@@ -70,18 +69,20 @@ OMLX_API_KEY = os.getenv("OMLX_API_KEY", "")
 OMLX_TIMEOUT_SEC = float(os.getenv("AIY_OMLX_TIMEOUT_SEC", "30"))
 OMLX_MAX_UPLOAD_BYTES = int(os.getenv("AIY_OMLX_MAX_UPLOAD_BYTES", "20971520"))
 OMLX_ASR_MODEL = os.getenv("AIY_OMLX_ASR_MODEL", "Qwen3-ASR-0.6B-8bit")
-OMLX_TTS_MODEL = os.getenv(
-    "AIY_OMLX_TTS_MODEL", "Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
+OMLX_ASR_LANGUAGE = os.getenv(
+    "AIY_OMLX_ASR_LANGUAGE", os.getenv("AIY_OMLX_TTS_LANGUAGE", "Chinese")
 )
-OMLX_TTS_VOICE = os.getenv("AIY_OMLX_TTS_VOICE", "Uncle_Fu")
-OMLX_TTS_VOICES = tuple(
-    voice.strip()
-    for voice in os.getenv("AIY_OMLX_TTS_VOICES", "").split(",")
-    if voice.strip()
-) or (OMLX_TTS_VOICE,)
-OMLX_TTS_LANGUAGE = os.getenv("AIY_OMLX_TTS_LANGUAGE", "Chinese")
-OMLX_TTS_INSTRUCTIONS = os.getenv("AIY_OMLX_TTS_INSTRUCTIONS", "越清楚越好。")
-OMLX_TTS_PREFIX = os.getenv("AIY_OMLX_TTS_PREFIX", "你剛剛說：")
+TTS_SPEECH_URL = os.getenv("AIY_TTS_SPEECH_URL", "").rstrip("/")
+TTS_API_KEY = os.getenv("AIY_TTS_API_KEY", "")
+TTS_MODEL = os.getenv("AIY_TTS_MODEL", "")
+TTS_VOICE = os.getenv("AIY_TTS_VOICE", "")
+TTS_TIMEOUT_SEC = float(os.getenv("AIY_TTS_TIMEOUT_SEC", "120"))
+TTS_MAX_INPUT_CHARS = int(os.getenv("AIY_TTS_MAX_INPUT_CHARS", "4096"))
+TTS_ASR_CONFIRMATION_PREFIX = os.getenv(
+    "AIY_TTS_ASR_CONFIRMATION_PREFIX",
+    os.getenv("AIY_OMLX_TTS_PREFIX", "你剛剛說："),
+)
+TTS_REQUEST_LOCK = threading.Lock()
 NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "").rstrip("/")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
 NTFY_TIMEOUT_SEC = float(os.getenv("AIY_NTFY_TIMEOUT_SEC", "5"))
@@ -271,6 +272,23 @@ def omlx_config_error() -> str | None:
     return None
 
 
+def tts_config_error() -> str | None:
+    parsed_url = urllib.parse.urlparse(TTS_SPEECH_URL)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        return "AIY_TTS_SPEECH_URL must be an absolute HTTP(S) URL"
+    if not TTS_API_KEY:
+        return "AIY_TTS_API_KEY is not configured"
+    if not TTS_MODEL:
+        return "AIY_TTS_MODEL is not configured"
+    if not TTS_VOICE:
+        return "AIY_TTS_VOICE is not configured"
+    if TTS_TIMEOUT_SEC < 120:
+        return "AIY_TTS_TIMEOUT_SEC must be at least 120 seconds"
+    if TTS_MAX_INPUT_CHARS < 1:
+        return "AIY_TTS_MAX_INPUT_CHARS must be positive"
+    return None
+
+
 def post_omlx(path: str, body: bytes, content_type: str) -> bytes:
     request = urllib.request.Request(
         f"{OMLX_BASE_URL}{path}",
@@ -288,6 +306,49 @@ def post_omlx(path: str, body: bytes, content_type: str) -> bytes:
         raise RuntimeError(f"{path} returned HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"{path} is unreachable: {exc.reason}") from exc
+
+
+def tts_error_body(exc: urllib.error.HTTPError) -> str:
+    """Return a bounded, single-line error body for the service journal."""
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except OSError as read_error:
+        return f"<could not read error body: {read_error}>"
+    normalized = " ".join(body.split())
+    return normalized[:1200] or "<empty response body>"
+
+
+def post_tts(body: bytes) -> bytes:
+    """Send one serialized request to the remote single-worker BreezyVoice API."""
+    request = urllib.request.Request(
+        TTS_SPEECH_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {TTS_API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        # BreezyVoice is currently single-worker.  More than one completed
+        # voice loop must wait here instead of competing at the remote API.
+        with TTS_REQUEST_LOCK:
+            with urllib.request.urlopen(request, timeout=TTS_TIMEOUT_SEC) as response:
+                return response.read()
+    except urllib.error.HTTPError as exc:
+        response_body = tts_error_body(exc)
+        print(f"[tts] request failed: HTTP {exc.code}; body={response_body}")
+        raise RuntimeError(
+            f"BreezyVoice TTS returned HTTP {exc.code}: {response_body}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        print(f"[tts] request failed: {exc.reason}")
+        raise RuntimeError(f"BreezyVoice TTS is unreachable: {exc.reason}") from exc
+    except TimeoutError as exc:
+        print(f"[tts] request failed: timed out after {TTS_TIMEOUT_SEC:.0f}s")
+        raise RuntimeError(
+            f"BreezyVoice TTS timed out after {TTS_TIMEOUT_SEC:.0f}s"
+        ) from exc
 
 
 def parse_opencode_model() -> tuple[str, str] | None:
@@ -480,7 +541,7 @@ def encode_transcription_request(wav_path: Path) -> tuple[bytes, str]:
         body.extend(b"\r\n")
 
     add_field("model", OMLX_ASR_MODEL)
-    add_field("language", OMLX_TTS_LANGUAGE)
+    add_field("language", OMLX_ASR_LANGUAGE)
     body.extend(f"--{boundary}\r\n".encode())
     body.extend(
         b'Content-Disposition: form-data; name="file"; filename="recording.wav"\r\n'
@@ -506,6 +567,9 @@ def run_voice_loop(
         config_error = omlx_config_error()
         if config_error:
             raise RuntimeError(config_error)
+        config_error = tts_config_error()
+        if config_error:
+            raise RuntimeError(config_error)
 
         request_body, content_type = encode_transcription_request(wav_path)
         transcription = json.loads(
@@ -515,7 +579,11 @@ def run_voice_loop(
         if not transcript:
             raise RuntimeError("ASR returned no text")
 
-        tts_input = f"{OMLX_TTS_PREFIX}{transcript}" if OMLX_TTS_PREFIX else transcript
+        tts_input = (
+            f"{TTS_ASR_CONFIRMATION_PREFIX}{transcript}"
+            if TTS_ASR_CONFIRMATION_PREFIX
+            else transcript
+        )
         ai_reply = None
         try:
             config_error = opencode_config_error()
@@ -537,21 +605,21 @@ def run_voice_loop(
                 f"settled={agent_result.elapsed_ms} ms, web tools available)"
             )
         start_ntfy_voice_notification(job_id, transcript, ai_reply)
-        tts_voice = random.choice(OMLX_TTS_VOICES)
-        print(f"[tts] selected voice: {tts_voice}")
+        if len(tts_input) > TTS_MAX_INPUT_CHARS:
+            raise RuntimeError(
+                f"TTS input exceeds AIY_TTS_MAX_INPUT_CHARS ({TTS_MAX_INPUT_CHARS})"
+            )
+        print(f"[tts] selected BreezyVoice voice: {TTS_VOICE}")
         tts_request = json.dumps(
             {
-                "model": OMLX_TTS_MODEL,
+                "model": TTS_MODEL,
                 "input": tts_input,
-                "voice": tts_voice,
-                "language": OMLX_TTS_LANGUAGE,
-                "instructions": OMLX_TTS_INSTRUCTIONS,
-                "speed": 1.0,
+                "voice": TTS_VOICE,
                 "response_format": "wav",
             },
             ensure_ascii=False,
         ).encode()
-        audio = post_omlx("/v1/audio/speech", tts_request, "application/json")
+        audio = post_tts(tts_request)
         if len(audio) <= 44 or audio[:4] != b"RIFF":
             raise RuntimeError("TTS did not return a WAV file")
 

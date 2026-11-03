@@ -7,13 +7,13 @@
 2. 功能 B：長按安全關機（10 秒警告，12 秒關機）
 3. 輔助手勢：切換所有 daemon 聲音的三段輸出音量
 
-功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字交由內網 T450 的 OpenCode HTTP server 產生回覆，並以短期對話、固定家庭背景與即時本機時間補足上下文，再交由 Mac TTS 播放。
+功能 A 透過 WireGuard 使用 Mac mini 的 ASR 與 BreezyVoice TTS API；ASR 文字交由內網 T450 的 OpenCode HTTP server 產生回覆，並以短期對話、固定家庭背景與即時本機時間補足上下文，再交由 Mac TTS 播放。
 
 ## Quick Start
 
-這份快速開始的目標是讓 **Google AIY Voice Kit V1／Voice HAT 接在 Raspberry Pi 3B** 的裝置先完成錄音 Echo，再接上自己的 ASR/TTS 服務。它已在 Debian 13（Raspberry Pi OS 相容環境）驗證；不同聲卡、GPIO 配線或 AIY 硬體版本需要自行調整裝置設定。
+這份快速開始的目標是讓 **Google AIY Voice Kit V1／Voice HAT 接在 Raspberry Pi 3B** 的裝置先完成錄音 Echo，再接上自己的 ASR 與 TTS 服務。它已在 Debian 13（Raspberry Pi OS 相容環境）驗證；不同聲卡、GPIO 配線或 AIY 硬體版本需要自行調整裝置設定。
 
-本專案不會在 Pi 本機執行 ASR、TTS 或大型模型。完整模式需要一個可從 Pi 存取、OpenAI API 相容的 ASR/TTS endpoint；OpenCode AI 回覆則是可選的第二台私有主機。
+本專案不會在 Pi 本機執行 ASR、TTS 或大型模型。完整模式需要 Pi 可存取的 ASR endpoint 與 TTS endpoint；OpenCode AI 回覆則是可選的第二台私有主機。
 
 ### 1. 安裝系統工具並 clone
 
@@ -51,9 +51,9 @@ sudo usermod -aG gpio "$USER"
 
 若 Echo 未成功，先處理聲卡、麥克風、喇叭或 GPIO 問題，不要繼續設定網路服務。
 
-### 3. 設定 ASR/TTS endpoint
+### 3. 設定 ASR 與 BreezyVoice TTS endpoint
 
-準備一個 AIY 可達的 OpenAI API 相容服務，至少提供 `/v1/audio/transcriptions` 與 `/v1/audio/speech`。複製範例、填入 endpoint、金鑰與實際模型名稱：
+準備 AIY 可達的 OpenAI API 相容 ASR endpoint，以及 BreezyVoice 的 `/v1/audio/speech` endpoint。複製範例、填入 endpoint、金鑰與實際模型名稱：
 
 ```bash
 install -d -m 700 ~/.config/aiy-voice
@@ -62,14 +62,15 @@ chmod 600 ~/.config/aiy-voice/omlx.env
 nano ~/.config/aiy-voice/omlx.env
 ```
 
-可先確認 API 可達；此命令不會輸出金鑰：
+可先確認兩個 API 可達；命令不會輸出金鑰：
 
 ```bash
 set -a; . ~/.config/aiy-voice/omlx.env; set +a
-curl -fsS "$OMLX_BASE_URL/v1/models" -H "Authorization: Bearer $OMLX_API_KEY" >/dev/null && echo 'ASR/TTS API reachable'
+curl -fsS "$OMLX_BASE_URL/v1/models" -H "Authorization: Bearer $OMLX_API_KEY" >/dev/null && echo 'ASR API reachable'
+curl -fsS "${AIY_TTS_SPEECH_URL%/v1/audio/speech}/health" >/dev/null && echo 'BreezyVoice TTS API reachable'
 ```
 
-只設定此檔案時，按鈕流程會在 Echo 後播放 ASR 確認語音。TTS 預設為單一聲線；若想讓每輪動態回覆隨機選聲線，設定 `AIY_OMLX_TTS_VOICES`，例如 `Vivian,Ono_Anna`。固定提示音與 Echo 不會受這項設定影響。
+只設定此檔案時，按鈕流程會在 Echo 後播放 ASR 確認語音。BreezyVoice 的動態 TTS 預設為 `zh_female`，並以完整的 `AIY_TTS_SPEECH_URL`、`AIY_TTS_API_KEY`、`AIY_TTS_MODEL` 與 `AIY_TTS_VOICE` 設定；timeout 必須至少 120 秒。固定提示音與 Echo 不會受這項設定影響。daemon 會序列化動態 TTS 請求，配合單工的 BreezyVoice 服務。
 
 ### 4. 可選：加入 OpenCode AI 回覆
 
@@ -209,7 +210,7 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 ## 本機設定與安全
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
-- daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。TTS 預設使用 `AIY_OMLX_TTS_VOICE` 指定單一聲線；如需每一輪隨機選聲線，可設 `AIY_OMLX_TTS_VOICES='Vivian,Ono_Anna'`。這只影響動態 TTS 回覆，不會改動錄音 Echo 或預先生成的固定提示音。
+- daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 ASR 的 `OMLX_BASE_URL`、`OMLX_API_KEY`，以及 BreezyVoice 的 `AIY_TTS_SPEECH_URL`、`AIY_TTS_API_KEY`、`AIY_TTS_MODEL`、`AIY_TTS_VOICE`；該檔案應為 `600`，且不可提交。ASR 與 TTS 可以使用不同服務與 token。動態 TTS 只會呼叫 `AIY_TTS_SPEECH_URL`，不會呼叫 ASR server 的 `/v1/audio/speech`；固定提示音與 Echo 也不會受這項設定影響。
 - daemon 不再讀取 `~/.config/aiy-voice/openai.env` 或直接呼叫 OpenAI API；可保留該私有檔案供其他用途，但它不影響本服務。OpenCode server 使用自己的 ChatGPT/OpenAI OAuth；請勿把 OAuth credential 複製進 repository 或 AIY 環境檔。
 - daemon 從私有 `~/.config/aiy-voice/opencode.env` 載入 T450 server URL、Basic Auth credential 與模型設定。請從 [範例](examples/opencode.env.example) 複製後填入真實值，檔案權限設為 `600`；不可提交。預設使用 `AIY_OPENCODE_MODEL=openai/gpt-5.6-luna-fast`、`AIY_OPENCODE_TIMEOUT_SEC=45`、`AIY_AGENT_MAX_INPUT_CHARS=600` 與 `AIY_AGENT_MAX_REPLY_CHARS=120`。可選用 `AIY_ASSISTANT_NAME` 設定助理的朗讀名稱；未設定時維持 `AIY Voice`。
 - `AIY_MEMORY_WINDOW_SEC` 預設為 180 秒，是 session 的正式閒置邊界。`AIY_MEMORY_MAX_TURNS=0` 預設停用舊版三輪上限；若日後需要相容行為，設為正整數即可。
@@ -227,7 +228,7 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 - `~/aiy-voice/`：專案程式與 README
 - `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
 - `~/aiy-voice/opencode_voice.py`：不含第三方套件的 OpenCode HTTP session client
-- `~/aiy-voice/examples/omlx.env.example`：AIY 連向私有 ASR/TTS API 的設定範例
+- `~/aiy-voice/examples/omlx.env.example`：AIY 連向私有 ASR 與 BreezyVoice TTS API 的設定範例
 - `~/aiy-voice/examples/opencode.env.example`：AIY 連向私有 OpenCode server 的設定範例
 - `~/aiy-voice/pi_rpc_baseline.py`：不接 GPIO 的 Pi RPC 常駐效能測試
 - `~/aiy-voice/pi_extensions/aiy_web_fetch.ts`：Pi 唯一可選的受控公開網頁工具
