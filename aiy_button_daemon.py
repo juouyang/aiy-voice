@@ -14,7 +14,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +34,7 @@ from aiy_button_echo import (
     beep_stop,
     detect_card,
     process_for_playback,
+    scale_wav_for_playback,
     start_echo_playback,
     stop_recorder,
 )
@@ -79,12 +79,6 @@ TTS_MODEL = os.getenv("AIY_TTS_MODEL", "")
 TTS_VOICE = os.getenv("AIY_TTS_VOICE", "")
 TTS_TIMEOUT_SEC = float(os.getenv("AIY_TTS_TIMEOUT_SEC", "120"))
 TTS_MAX_INPUT_CHARS = int(os.getenv("AIY_TTS_MAX_INPUT_CHARS", "4096"))
-TTS_NORMALIZATION_TARGET_PEAK = float(
-    os.getenv("AIY_TTS_NORMALIZATION_TARGET_PEAK", "0.60")
-)
-TTS_NORMALIZATION_MAX_GAIN = float(
-    os.getenv("AIY_TTS_NORMALIZATION_MAX_GAIN", "8")
-)
 TTS_ASR_CONFIRMATION_PREFIX = os.getenv(
     "AIY_TTS_ASR_CONFIRMATION_PREFIX",
     os.getenv("AIY_OMLX_TTS_PREFIX", "你剛剛說："),
@@ -293,10 +287,6 @@ def tts_config_error() -> str | None:
         return "AIY_TTS_TIMEOUT_SEC must be at least 120 seconds"
     if TTS_MAX_INPUT_CHARS < 1:
         return "AIY_TTS_MAX_INPUT_CHARS must be positive"
-    if not 0 < TTS_NORMALIZATION_TARGET_PEAK <= 1:
-        return "AIY_TTS_NORMALIZATION_TARGET_PEAK must be between 0 and 1"
-    if TTS_NORMALIZATION_MAX_GAIN < 1:
-        return "AIY_TTS_NORMALIZATION_MAX_GAIN must be at least 1"
     return None
 
 
@@ -398,66 +388,6 @@ def repair_streaming_wav_length(audio: bytes) -> bytes:
         offset = next_offset
 
     return audio
-
-
-def normalize_tts_wav_for_playback(src: Path, dst: Path, output_gain: float) -> None:
-    """Apply bounded level normalization to BreezyVoice PCM16 before playback.
-
-    BreezyVoice's useful speech level is much lower than its occasional sample
-    spikes.  A usual peak normalizer would amplify those spikes instead of the
-    voice.  The 99th-percentile absolute sample is a stable speech reference;
-    rare larger samples are limited before gain is applied.
-    """
-    with wave.open(str(src), "rb") as reader:
-        params = reader.getparams()
-        if params.comptype != "NONE" or params.sampwidth != 2:
-            raise ValueError("BreezyVoice normalization requires PCM16 WAV")
-        frames = reader.readframes(params.nframes)
-
-    samples = struct.unpack("<" + "h" * (len(frames) // 2), frames)
-    if not samples:
-        raise ValueError("TTS WAV contains no samples")
-
-    histogram = [0] * 32768
-    for sample in samples:
-        histogram[min(abs(sample), 32767)] += 1
-    percentile_rank = max(1, (len(samples) * 99 + 99) // 100)
-    seen = 0
-    reference = 0
-    for amplitude, count in enumerate(histogram):
-        seen += count
-        if seen >= percentile_rank:
-            reference = amplitude
-            break
-
-    if reference == 0:
-        auto_gain = 1.0
-    else:
-        auto_gain = min(
-            TTS_NORMALIZATION_TARGET_PEAK * 32767 / reference,
-            TTS_NORMALIZATION_MAX_GAIN,
-        )
-        auto_gain = max(auto_gain, 1.0)
-
-    total_gain = auto_gain * max(output_gain, 0.0)
-    limiter = (
-        32767
-        if total_gain <= 0
-        else min(32767, int(0.95 * 32767 / total_gain))
-    )
-    scaled = bytearray(len(frames))
-    for index, sample in enumerate(samples):
-        limited = max(-limiter, min(limiter, sample))
-        adjusted = max(-32768, min(32767, int(limited * total_gain)))
-        struct.pack_into("<h", scaled, index * 2, adjusted)
-    with wave.open(str(dst), "wb") as writer:
-        writer.setparams(params)
-        writer.writeframes(scaled)
-    print(
-        "[tts] normalized BreezyVoice WAV "
-        f"(p99={reference / 32767:.3%}, auto_gain={auto_gain:.2f}x, "
-        f"output_gain={output_gain:.2f}x)"
-    )
 
 
 def parse_opencode_model() -> tuple[str, str] | None:
@@ -932,16 +862,19 @@ def main() -> int:
         source_path = tts_reply_path
         tts_reply_path = None
         output_gain = OUTPUT_VOLUME_GAINS[output_volume_profile]
-        scaled_path = source_path.with_name(f"{source_path.stem}-output.wav")
-        try:
-            normalize_tts_wav_for_playback(source_path, scaled_path, output_gain)
-        except Exception as exc:
-            print(f"[warn] could not normalize TTS output; playing original: {exc}")
-            delete_file(scaled_path)
+        if output_gain == 1.0:
             tts_playback_path = source_path
         else:
-            delete_file(source_path)
-            tts_playback_path = scaled_path
+            scaled_path = source_path.with_name(f"{source_path.stem}-output.wav")
+            try:
+                scale_wav_for_playback(source_path, scaled_path, output_gain)
+            except Exception as exc:
+                print(f"[warn] could not scale TTS output; playing original: {exc}")
+                delete_file(scaled_path)
+                tts_playback_path = source_path
+            else:
+                delete_file(source_path)
+                tts_playback_path = scaled_path
         print("[tts] playback start")
         player = start_echo_playback(play_dev, tts_playback_path)
         if player is not None:
