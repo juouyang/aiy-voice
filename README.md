@@ -141,7 +141,10 @@ sudo systemctl restart aiy-button-daemon.service
 
 填入 `OPENAI_API_KEY` 後，才將 `AIY_VOICE_BACKEND` 改為 `openai_realtime`。預設值 `opencode_omlx` 保留已驗證的舊路徑，因此在尚未完成真實音訊測試前不會意外切換。Realtime 使用 `gpt-realtime-2.1`、`marin` 聲線，並在 3 分鐘閒置、取消或 daemon 停止時關閉連線，使下一輪從新的短期對話開始。
 
-此第一版 Realtime 後端不提供網路搜尋；它會如實說明沒有即時網路能力。OpenAI 的 hosted web search 是 Responses API 工具，不能假裝成 Realtime 內建功能，後續會以明確的工具橋接方式補上。
+Realtime 可選擇啟用受控的 hosted web search bridge：在私有 `openai.env` 設定
+`AIY_OPENAI_WEB_SEARCH_ENABLED='true'`。這不是每一題都搜尋：Realtime 僅在判斷問題需要目前、近期或會變動的公開資料時呼叫唯一的 `search_web` function；Pi 才以同一把 OpenAI API key 呼叫一次 Responses API 的 `web_search`，將最多 1,600 字的外部事實摘要回填給 Realtime 朗讀。一般聊天、裝置時間與固定背景不會觸發搜尋。搜尋逾時或失敗時，Realtime 會收到失敗結果並如實說明，而 Echo 與按鈕流程不會中斷。
+
+此 bridge 不安裝本機模型、不開放 shell、檔案、GPIO、MCP 或任意 URL 工具。搜尋回傳資料一律視為不可信外部內容；語音 prompt 要求不朗讀資料來源名稱或網址。
 
 ## 常駐按鈕行為
 
@@ -229,7 +232,7 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。TTS 預設使用 `AIY_OMLX_TTS_VOICE` 指定單一聲線；如需每一輪隨機選聲線，可設 `AIY_OMLX_TTS_VOICES='Vivian,Ono_Anna'`。這只影響動態 TTS 回覆，不會改動錄音 Echo 或預先生成的固定提示音。
-- 預設 `AIY_VOICE_BACKEND=opencode_omlx`，沿用 Mac mini ASR/TTS 與 T450 OpenCode。若明確設為 `openai_realtime`，daemon 會讀取私有 `~/.config/aiy-voice/openai.env` 的 `OPENAI_API_KEY` 與 Realtime 設定；檔案權限必須為 `600`，不可提交。Realtime 版不使用任何本機模型、Mac mini 或 T450，但目前也不含網路搜尋。OpenCode server 使用自己的 ChatGPT/OpenAI OAuth；請勿把 OAuth credential 複製進 repository 或 AIY 環境檔。
+- 預設 `AIY_VOICE_BACKEND=opencode_omlx`，沿用 Mac mini ASR/TTS 與 T450 OpenCode。若明確設為 `openai_realtime`，daemon 會讀取私有 `~/.config/aiy-voice/openai.env` 的 `OPENAI_API_KEY` 與 Realtime 設定；檔案權限必須為 `600`，不可提交。Realtime 版不使用任何本機模型、Mac mini 或 T450。設定 `AIY_OPENAI_WEB_SEARCH_ENABLED=true` 時，僅在 Realtime 明確呼叫 `search_web` 時才額外使用 Responses hosted web search；未設定時保持無網路搜尋。OpenCode server 使用自己的 ChatGPT/OpenAI OAuth；請勿把 OAuth credential 複製進 repository 或 AIY 環境檔。
 - daemon 從私有 `~/.config/aiy-voice/opencode.env` 載入 T450 server URL、Basic Auth credential 與模型設定。請從 [範例](examples/opencode.env.example) 複製後填入真實值，檔案權限設為 `600`；不可提交。預設使用 `AIY_OPENCODE_MODEL=openai/gpt-5.6-luna-fast`、`AIY_OPENCODE_TIMEOUT_SEC=45`、`AIY_AGENT_MAX_INPUT_CHARS=600` 與 `AIY_AGENT_MAX_REPLY_CHARS=120`。可選用 `AIY_ASSISTANT_NAME` 設定助理的朗讀名稱；未設定時維持 `AIY Voice`。
 - `AIY_MEMORY_WINDOW_SEC` 預設為 180 秒，是 session 的正式閒置邊界。`AIY_MEMORY_MAX_TURNS=0` 預設停用舊版三輪上限；若日後需要相容行為，設為正整數即可。
 - daemon 每次送 OpenCode 前，以 `AIY_ASSISTANT_TIMEZONE`（預設 `Asia/Taipei`）取得裝置目前時間，作為可信 system context；這不是模型自行推測的時間。
@@ -246,7 +249,7 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 - `~/aiy-voice/`：專案程式與 README
 - `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
 - `~/aiy-voice/opencode_voice.py`：不含第三方套件的 OpenCode HTTP session client
-- `~/aiy-voice/openai_realtime_voice.py`：OpenAI Realtime 的最小 WebSocket audio client
+- `~/aiy-voice/openai_realtime_voice.py`：OpenAI Realtime WebSocket audio client 與可選的條件式 Responses web-search bridge
 - `~/aiy-voice/requirements.txt`：僅供可選 Realtime 後端使用的 Python transport 套件
 - `~/aiy-voice/examples/omlx.env.example`：AIY 連向私有 ASR/TTS API 的設定範例
 - `~/aiy-voice/examples/opencode.env.example`：AIY 連向私有 OpenCode server 的設定範例

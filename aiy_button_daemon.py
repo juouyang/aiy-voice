@@ -96,6 +96,16 @@ OPENAI_REALTIME_TIMEOUT_SEC = float(
 OPENAI_REALTIME_TRANSCRIBE_MODEL = os.getenv(
     "AIY_OPENAI_REALTIME_TRANSCRIBE_MODEL", "gpt-transcribe"
 )
+OPENAI_WEB_SEARCH_ENABLED = os.getenv(
+    "AIY_OPENAI_WEB_SEARCH_ENABLED", "false"
+).strip().lower() in ("1", "true", "yes", "on")
+OPENAI_WEB_SEARCH_MODEL = os.getenv("AIY_OPENAI_WEB_SEARCH_MODEL", "gpt-5.4-mini")
+OPENAI_WEB_SEARCH_TIMEOUT_SEC = float(
+    os.getenv("AIY_OPENAI_WEB_SEARCH_TIMEOUT_SEC", "45")
+)
+OPENAI_WEB_SEARCH_MAX_RESULT_CHARS = int(
+    os.getenv("AIY_OPENAI_WEB_SEARCH_MAX_RESULT_CHARS", "1600")
+)
 OPENAI_SAFETY_IDENTIFIER = os.getenv("AIY_OPENAI_SAFETY_IDENTIFIER", "")
 NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "").rstrip("/")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
@@ -352,6 +362,13 @@ def realtime_config_error() -> str | None:
         return "AIY_OPENAI_REALTIME_TIMEOUT_SEC must be positive"
     if not OPENAI_REALTIME_TRANSCRIBE_MODEL:
         return "AIY_OPENAI_REALTIME_TRANSCRIBE_MODEL is not configured"
+    if OPENAI_WEB_SEARCH_ENABLED:
+        if not OPENAI_WEB_SEARCH_MODEL:
+            return "AIY_OPENAI_WEB_SEARCH_MODEL is not configured"
+        if OPENAI_WEB_SEARCH_TIMEOUT_SEC <= 0:
+            return "AIY_OPENAI_WEB_SEARCH_TIMEOUT_SEC must be positive"
+        if OPENAI_WEB_SEARCH_MAX_RESULT_CHARS < 200:
+            return "AIY_OPENAI_WEB_SEARCH_MAX_RESULT_CHARS must be at least 200"
     if MEMORY_WINDOW_SEC <= 0:
         return "AIY_MEMORY_WINDOW_SEC must be positive"
     try:
@@ -414,16 +431,26 @@ def load_assistant_profile() -> str:
         return ""
 
 
-def build_agent_system_prompt(*, enable_web: bool) -> str:
+def build_agent_system_prompt(*, enable_web: bool, realtime_web_search: bool = False) -> str:
     """Build trusted context for the selected remote AI backend."""
-    web_capability = (
-        "你可依問題需要自行使用 websearch 與 webfetch 取得公開網路資料；"
-        "一般聊天或本機時間問題不必查網。除了這兩項工具以外，你無法存取檔案、"
-        "執行指令、控制硬體或存取帳號；不可聲稱已完成這些事。"
-        if enable_web
-        else "你目前沒有網路搜尋、網頁讀取、檔案、指令、硬體或帳號存取能力；"
-        "不可聲稱已查詢最新網路資料或已完成這些事。"
-    )
+    if realtime_web_search:
+        web_capability = (
+            "你可在確實需要目前、近期、未來或其他會變動的公開資訊時，"
+            "呼叫唯一的 search_web 功能；一般聊天、本機時間與既有對話內容不可呼叫。"
+            "除了這項功能外，你無法存取網頁、檔案、執行指令、控制硬體或存取帳號；"
+            "不可聲稱已完成這些事。"
+        )
+    elif enable_web:
+        web_capability = (
+            "你可依問題需要自行使用 websearch 與 webfetch 取得公開網路資料；"
+            "一般聊天或本機時間問題不必查網。除了這兩項工具以外，你無法存取檔案、"
+            "執行指令、控制硬體或存取帳號；不可聲稱已完成這些事。"
+        )
+    else:
+        web_capability = (
+            "你目前沒有網路搜尋、網頁讀取、檔案、指令、硬體或帳號存取能力；"
+            "不可聲稱已查詢最新網路資料或已完成這些事。"
+        )
     context_parts = [
         AGENT_INSTRUCTIONS,
         web_capability,
@@ -463,6 +490,10 @@ def create_voice_assistant() -> OpenCodeVoiceAssistant | OpenAIRealtimeVoiceAssi
             OPENAI_REALTIME_TIMEOUT_SEC,
             MEMORY_WINDOW_SEC,
             OPENAI_REALTIME_TRANSCRIBE_MODEL,
+            OPENAI_WEB_SEARCH_ENABLED,
+            OPENAI_WEB_SEARCH_MODEL,
+            OPENAI_WEB_SEARCH_TIMEOUT_SEC,
+            OPENAI_WEB_SEARCH_MAX_RESULT_CHARS,
             OPENAI_SAFETY_IDENTIFIER,
         )
 
@@ -482,15 +513,21 @@ def create_voice_assistant() -> OpenCodeVoiceAssistant | OpenAIRealtimeVoiceAssi
     )
 
 
-def format_ntfy_voice_message(transcript: str, ai_reply: str | None) -> str:
+def format_ntfy_voice_message(
+    transcript: str, ai_reply: str | None, web_sources: tuple[str, ...] = ()
+) -> str:
     """Keep the user's words and the assistant's reply together for review."""
     message = f"你說：{transcript}"
     if ai_reply:
         message += f"\n\nAI：{ai_reply}"
+    if web_sources:
+        message += "\n\n網路來源：\n" + "\n".join(web_sources)
     return message
 
 
-def publish_ntfy_voice_message(transcript: str, ai_reply: str | None) -> None:
+def publish_ntfy_voice_message(
+    transcript: str, ai_reply: str | None, web_sources: tuple[str, ...] = ()
+) -> None:
     """Best-effort voice notification that never affects the playback flow."""
     if not NTFY_BASE_URL or not NTFY_TOPIC:
         print("[ntfy] notification skipped: NTFY_BASE_URL or NTFY_TOPIC is missing")
@@ -499,7 +536,9 @@ def publish_ntfy_voice_message(transcript: str, ai_reply: str | None) -> None:
     try:
         request = urllib.request.Request(
             f"{NTFY_BASE_URL}/{urllib.parse.quote(NTFY_TOPIC, safe='')}",
-            data=format_ntfy_voice_message(transcript, ai_reply).encode("utf-8"),
+            data=format_ntfy_voice_message(transcript, ai_reply, web_sources).encode(
+                "utf-8"
+            ),
             method="POST",
             headers={
                 "Content-Type": "text/plain; charset=utf-8",
@@ -516,13 +555,16 @@ def publish_ntfy_voice_message(transcript: str, ai_reply: str | None) -> None:
 
 
 def start_ntfy_voice_notification(
-    job_id: int, transcript: str, ai_reply: str | None
+    job_id: int,
+    transcript: str,
+    ai_reply: str | None,
+    web_sources: tuple[str, ...] = (),
 ) -> None:
     """Dispatch ntfy work separately so TTS never waits for it."""
     try:
         threading.Thread(
             target=publish_ntfy_voice_message,
-            args=(transcript, ai_reply),
+            args=(transcript, ai_reply, web_sources),
             name=f"aiy-ntfy-{job_id}",
             daemon=True,
         ).start()
@@ -649,16 +691,26 @@ def run_openai_realtime_voice_loop(
     try:
         result = assistant.ask_wav(
             wav_path,
-            build_agent_system_prompt(enable_web=False),
+            build_agent_system_prompt(
+                enable_web=assistant.web_search_enabled,
+                realtime_web_search=assistant.web_search_enabled,
+            ),
         )
         transcript = result.input_transcript or "（OpenAI 未回傳輸入逐字稿）"
         ai_reply = limit_spoken_reply(result.output_transcript)
         write_pcm24k_wav(temporary_reply_path, result.output_pcm)
         temporary_reply_path.replace(reply_path)
-        start_ntfy_voice_notification(job_id, transcript, ai_reply or None)
+        start_ntfy_voice_notification(
+            job_id, transcript, ai_reply or None, result.web_sources
+        )
         print(
             f"[ai] OpenAI Realtime reply ready ({assistant.model_label}; "
-            f"settled={result.elapsed_ms} ms, web search unavailable)"
+            f"settled={result.elapsed_ms} ms, "
+            + (
+                f"web search used ({result.web_source_count} sources)"
+                if result.web_search_used
+                else "web search not used"
+            )
         )
         results.put(VoiceLoopResult(job_id=job_id, reply_path=reply_path, agent_turn=True))
     except Exception as exc:
@@ -751,7 +803,12 @@ def main() -> int:
     else:
         print(
             f"- AI runtime: OpenAI Realtime ({OPENAI_REALTIME_MODEL}; "
-            "direct audio, web search unavailable)"
+            "direct audio, "
+            + (
+                f"conditional hosted web search via {OPENAI_WEB_SEARCH_MODEL})"
+                if OPENAI_WEB_SEARCH_ENABLED
+                else "web search disabled)"
+            )
         )
     print(f"- Shutdown warning: {WARN_SEC:.1f}s")
     print(f"- Shutdown: {SHUTDOWN_SEC:.1f}s")
