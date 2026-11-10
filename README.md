@@ -7,7 +7,7 @@
 2. 功能 B：長按安全關機（10 秒警告，12 秒關機）
 3. 輔助手勢：切換所有 daemon 聲音的三段輸出音量
 
-功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字交由內網 T450 的 OpenCode HTTP server 產生回覆，並以短期對話、固定家庭背景與即時本機時間補足上下文，再交由 Mac TTS 播放。
+預設的功能 A 透過 WireGuard 使用 Mac mini 的 ASR/TTS API；ASR 文字交由內網 T450 的 OpenCode HTTP server 產生回覆，並以短期對話、固定家庭背景與即時本機時間補足上下文，再交由 Mac TTS 播放。另有可選的 OpenAI Realtime 後端，讓 Pi 直接把錄音送到雲端並取得語音回覆，不依賴 Mac mini 或 T450。
 
 ## Quick Start
 
@@ -27,7 +27,7 @@ cd ~/aiy-voice
 python3 -m venv ~/.venvs/aiy
 ```
 
-Python runtime 只使用標準函式庫，因此不需要安裝 Python 套件。先確認 AIY 硬體可被系統看到：
+預設 OpenCode/Mac mini 後端只使用標準函式庫。若之後啟用 OpenAI Realtime，另依下方步驟安裝一個小型 WebSocket transport 套件。先確認 AIY 硬體可被系統看到：
 
 ```bash
 arecord -l
@@ -124,6 +124,25 @@ sudo systemctl status aiy-button-daemon.service
 journalctl -u aiy-button-daemon.service -f
 ```
 
+### 6. 可選：改用 OpenAI Realtime（全雲端語音）
+
+Realtime 模式保留 AIY 的兩次短按、原始錄音 Echo、按鈕取消、音量與 ntfy 行為；錄音會在 Pi 轉為 24 kHz mono PCM 後直接送入 OpenAI，回覆音訊則由 Pi 封裝為 WAV 後沿用既有 ALSA 播放流程。它不使用 Mac mini ASR/TTS，也不呼叫 T450 OpenCode server。
+
+先在 AIY 安裝唯一的 Python 依賴並建立私有設定檔：
+
+```bash
+source ~/.venvs/aiy/bin/activate
+pip install -r ~/aiy-voice/requirements.txt
+cp ~/aiy-voice/examples/openai-realtime.env.example ~/.config/aiy-voice/openai.env
+chmod 600 ~/.config/aiy-voice/openai.env
+nano ~/.config/aiy-voice/openai.env
+sudo systemctl restart aiy-button-daemon.service
+```
+
+填入 `OPENAI_API_KEY` 後，才將 `AIY_VOICE_BACKEND` 改為 `openai_realtime`。預設值 `opencode_omlx` 保留已驗證的舊路徑，因此在尚未完成真實音訊測試前不會意外切換。Realtime 使用 `gpt-realtime-2.1`、`marin` 聲線，並在 3 分鐘閒置、取消或 daemon 停止時關閉連線，使下一輪從新的短期對話開始。
+
+此第一版 Realtime 後端不提供網路搜尋；它會如實說明沒有即時網路能力。OpenAI 的 hosted web search 是 Responses API 工具，不能假裝成 Realtime 內建功能，後續會以明確的工具橋接方式補上。
+
 ## 常駐按鈕行為
 
 短按定義為按下後在 1.2 秒內放開：
@@ -133,9 +152,9 @@ journalctl -u aiy-button-daemon.service -f
 | 待命 | — | LED 熄滅 | 等待第一次短按 |
 | 開始錄音 | 第一次短按 | LED 常亮、上行提示音 | 開始收音 |
 | 錄音中 | 說話 | LED 持續常亮 | 持續錄音 |
-| 停止並確認 | 第二次短按 | 下行提示音、LED 閃爍 | 立即播放原始錄音；背景呼叫 Mac ASR、OpenCode 與 Mac TTS |
-| 錄音時間上限 | 錄音達 45 秒 | 下行提示音、LED 閃爍 | 自動停止錄音，接續原始錄音 Echo、ASR、OpenCode 與 TTS |
-| 語音確認 | 原始錄音播放完 | LED 持續閃爍 | 播放 Mac TTS 產生的簡短 AI 回覆 |
+| 停止並確認 | 第二次短按 | 下行提示音、LED 閃爍 | 立即播放原始錄音；背景呼叫目前選定的語音後端 |
+| 錄音時間上限 | 錄音達 45 秒 | 下行提示音、LED 閃爍 | 自動停止錄音，接續原始錄音 Echo 與目前選定的語音後端 |
+| 語音確認 | 原始錄音播放完 | LED 持續閃爍 | 播放目前後端產生的簡短 AI 回覆 |
 | 本機短期記憶 | AI 回覆完整播放完畢 | 無額外聲光提示 | 記住本輪問答，供接下來 3 分鐘內的後續對話理解上下文 |
 | 固定家庭背景與時間 | 每個 OpenCode session／每次提問 | 無額外聲光提示 | 載入管理者設定的家庭背景，並附入 Asia/Taipei 即時時間；不會自行寫入新資料 |
 | 取消語音本輪 | Echo 回放、網路處理或最終 TTS WAV 播放中短按一次 | 立即停止目前聲音、取消提示音、LED 熄滅 | 捨棄本輪後續回覆並回待命；下一次短按才開始新錄音 |
@@ -210,7 +229,7 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 - 此 repository 不包含雲端 API key、帳號密碼、私有 URL 或裝置專屬設定。
 - `.env`、`*.env`、`*.local`、私鑰與音量設定檔都必須只留在裝置本機，不可提交。
 - daemon 可從使用者私有的 `~/.config/aiy-voice/omlx.env` 載入 `OMLX_BASE_URL` 與 `OMLX_API_KEY`；該檔案應為 `600`，且不可提交。TTS 預設使用 `AIY_OMLX_TTS_VOICE` 指定單一聲線；如需每一輪隨機選聲線，可設 `AIY_OMLX_TTS_VOICES='Vivian,Ono_Anna'`。這只影響動態 TTS 回覆，不會改動錄音 Echo 或預先生成的固定提示音。
-- daemon 不再讀取 `~/.config/aiy-voice/openai.env` 或直接呼叫 OpenAI API；可保留該私有檔案供其他用途，但它不影響本服務。OpenCode server 使用自己的 ChatGPT/OpenAI OAuth；請勿把 OAuth credential 複製進 repository 或 AIY 環境檔。
+- 預設 `AIY_VOICE_BACKEND=opencode_omlx`，沿用 Mac mini ASR/TTS 與 T450 OpenCode。若明確設為 `openai_realtime`，daemon 會讀取私有 `~/.config/aiy-voice/openai.env` 的 `OPENAI_API_KEY` 與 Realtime 設定；檔案權限必須為 `600`，不可提交。Realtime 版不使用任何本機模型、Mac mini 或 T450，但目前也不含網路搜尋。OpenCode server 使用自己的 ChatGPT/OpenAI OAuth；請勿把 OAuth credential 複製進 repository 或 AIY 環境檔。
 - daemon 從私有 `~/.config/aiy-voice/opencode.env` 載入 T450 server URL、Basic Auth credential 與模型設定。請從 [範例](examples/opencode.env.example) 複製後填入真實值，檔案權限設為 `600`；不可提交。預設使用 `AIY_OPENCODE_MODEL=openai/gpt-5.6-luna-fast`、`AIY_OPENCODE_TIMEOUT_SEC=45`、`AIY_AGENT_MAX_INPUT_CHARS=600` 與 `AIY_AGENT_MAX_REPLY_CHARS=120`。可選用 `AIY_ASSISTANT_NAME` 設定助理的朗讀名稱；未設定時維持 `AIY Voice`。
 - `AIY_MEMORY_WINDOW_SEC` 預設為 180 秒，是 session 的正式閒置邊界。`AIY_MEMORY_MAX_TURNS=0` 預設停用舊版三輪上限；若日後需要相容行為，設為正整數即可。
 - daemon 每次送 OpenCode 前，以 `AIY_ASSISTANT_TIMEZONE`（預設 `Asia/Taipei`）取得裝置目前時間，作為可信 system context；這不是模型自行推測的時間。
@@ -227,8 +246,11 @@ python3 ~/aiy-voice/pi_rpc_baseline.py --web-fetch "請查目前竹北天氣；�
 - `~/aiy-voice/`：專案程式與 README
 - `~/aiy-voice/aiy_button_daemon.py`：合併功能 A/B 的常駐 daemon
 - `~/aiy-voice/opencode_voice.py`：不含第三方套件的 OpenCode HTTP session client
+- `~/aiy-voice/openai_realtime_voice.py`：OpenAI Realtime 的最小 WebSocket audio client
+- `~/aiy-voice/requirements.txt`：僅供可選 Realtime 後端使用的 Python transport 套件
 - `~/aiy-voice/examples/omlx.env.example`：AIY 連向私有 ASR/TTS API 的設定範例
 - `~/aiy-voice/examples/opencode.env.example`：AIY 連向私有 OpenCode server 的設定範例
+- `~/aiy-voice/examples/openai-realtime.env.example`：AIY 直連 OpenAI Realtime 的設定範例
 - `~/aiy-voice/pi_rpc_baseline.py`：不接 GPIO 的 Pi RPC 常駐效能測試
 - `~/aiy-voice/pi_extensions/aiy_web_fetch.ts`：Pi 唯一可選的受控公開網頁工具
 - `~/aiy-voice/pi_extensions/aiy_voice_context.ts`：Pi 手動 baseline 可用的私有固定背景載入器

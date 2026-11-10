@@ -1,0 +1,3 @@
+# Required only when AIY_VOICE_BACKEND=openai_realtime.
+# Keep this deliberately small: it is a WebSocket transport, not an agent SDK.
+websocket-client>=1.8,<2
