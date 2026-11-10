@@ -309,18 +309,34 @@ class OpenAIRealtimeVoiceAssistant:
             raise OpenAIRealtimeError("Responses web search returned no answer")
 
         sources: list[str] = []
+
+        def add_source(source: object) -> None:
+            if not isinstance(source, dict):
+                return
+            url = str(source.get("url", "")).strip()
+            title = " ".join(str(source.get("title", "")).split())
+            if url:
+                sources.append(f"{title}: {url}" if title else url)
+
         for item in payload.get("output", []):
-            if not isinstance(item, dict) or item.get("type") != "web_search_call":
+            if not isinstance(item, dict):
                 continue
-            action = item.get("action")
-            if isinstance(action, dict) and isinstance(action.get("sources"), list):
-                for source in action["sources"]:
-                    if not isinstance(source, dict):
+            if item.get("type") == "web_search_call":
+                action = item.get("action")
+                if isinstance(action, dict) and isinstance(action.get("sources"), list):
+                    for source in action["sources"]:
+                        add_source(source)
+            # URL citations are returned with the final message even when the
+            # provider does not include full web_search_call sources.
+            if item.get("type") == "message":
+                for content in item.get("content", []):
+                    if not isinstance(content, dict):
                         continue
-                    url = str(source.get("url", "")).strip()
-                    title = " ".join(str(source.get("title", "")).split())
-                    if url:
-                        sources.append(f"{title}: {url}" if title else url)
+                    for annotation in content.get("annotations", []):
+                        if not isinstance(annotation, dict):
+                            continue
+                        citation = annotation.get("url_citation", annotation)
+                        add_source(citation)
 
         # Search output is external, untrusted data.  It is presented to
         # Realtime as data, never as developer instructions.
