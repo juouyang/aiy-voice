@@ -55,6 +55,7 @@ from opencode_voice import OpenCodeVoiceAssistant
 
 PROJECT_DIR = Path(__file__).resolve().parent
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.02"))
+BUTTON_DEBOUNCE_SEC = float(os.getenv("AIY_BUTTON_DEBOUNCE_SEC", "0.04"))
 ECHO_LED_FLASH_SEC = float(os.getenv("AIY_ECHO_LED_FLASH_SEC", "0.25"))
 MAX_RECORDING_SEC = float(os.getenv("AIY_MAX_RECORDING_SEC", "45"))
 SECONDARY_HOLD_MIN_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MIN_SEC", "1.5"))
@@ -826,6 +827,7 @@ def main() -> int:
     recording = False
     recording_started_at = None
     press_started_at = None
+    recording_stop_press_pending_release = False
     warned = False
     shutdown_requested = False
     led_on = False
@@ -1036,7 +1038,12 @@ def main() -> int:
 
     try:
         led.set(False)
+        # Button reads come directly from the GPIO line.  Keep only a state
+        # that has been stable briefly so contact bounce cannot turn one
+        # physical press into several logical presses/releases.
         last_pressed = read_button_pressed(GPIO_CHIP, BUTTON_PIN)
+        raw_pressed = last_pressed
+        raw_pressed_changed_at = time.monotonic()
 
         while True:
             now = time.monotonic()
@@ -1150,13 +1157,31 @@ def main() -> int:
                     if not recording and not warned:
                         led.set(False)
 
-            pressed = read_button_pressed(GPIO_CHIP, BUTTON_PIN)
+            sampled_pressed = read_button_pressed(GPIO_CHIP, BUTTON_PIN)
+            if sampled_pressed != raw_pressed:
+                raw_pressed = sampled_pressed
+                raw_pressed_changed_at = now
+
+            if (
+                raw_pressed != last_pressed
+                and now - raw_pressed_changed_at >= BUTTON_DEBOUNCE_SEC
+            ):
+                pressed = raw_pressed
+            else:
+                pressed = last_pressed
 
             if pressed and not last_pressed:
                 press_started_at = now
                 warned = False
                 shutdown_requested = False
                 secondary_hold_ready = False
+                # Stopping on the press edge, rather than waiting for its
+                # release, makes the record/stop gesture responsive.  The
+                # matching release is consumed below so it cannot immediately
+                # cancel the Echo/voice turn that this stop starts.
+                if recording:
+                    recording_stop_press_pending_release = True
+                    finish_recording("button press")
 
             elif pressed and press_started_at is not None:
                 held = now - press_started_at
@@ -1218,7 +1243,10 @@ def main() -> int:
             elif not pressed and last_pressed:
                 held = (now - press_started_at) if press_started_at is not None else 0.0
 
-                if secondary_pending:
+                if recording_stop_press_pending_release and not warned:
+                    print("[button] recording stop press released")
+
+                elif secondary_pending:
                     if (
                         held <= SHORT_PRESS_MAX_SEC
                         and press_started_at is not None
@@ -1304,6 +1332,7 @@ def main() -> int:
                 warned = False
                 shutdown_requested = False
                 secondary_hold_ready = False
+                recording_stop_press_pending_release = False
 
             last_pressed = pressed
             time.sleep(POLL_SEC)
