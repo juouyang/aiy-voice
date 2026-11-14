@@ -55,7 +55,7 @@ from opencode_voice import OpenCodeVoiceAssistant
 
 PROJECT_DIR = Path(__file__).resolve().parent
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.02"))
-BUTTON_DEBOUNCE_SEC = float(os.getenv("AIY_BUTTON_DEBOUNCE_SEC", "0.04"))
+BUTTON_DEBOUNCE_PERIOD = os.getenv("AIY_BUTTON_DEBOUNCE_PERIOD", "10ms")
 BUTTON_TRACE = os.getenv("AIY_BUTTON_TRACE", "").strip().lower() in {
     "1",
     "true",
@@ -174,6 +174,83 @@ class RecordingFinalizeResult:
     recorder_wait_ms: int = 0
     processing_ms: int = 0
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class ButtonEdge:
+    pressed: bool
+    observed_at: float
+
+
+class ButtonEdgeMonitor:
+    """Keep a GPIO edge monitor alive so short presses cannot fall between polls."""
+
+    def __init__(self, chip: str, pin: int, debounce_period: str) -> None:
+        self._closed = False
+        self._events: queue.Queue[ButtonEdge | RuntimeError] = queue.Queue()
+        self._proc = subprocess.Popen(
+            [
+                "gpiomon",
+                "-c",
+                chip,
+                "-e",
+                "both",
+                "-p",
+                debounce_period,
+                "-F",
+                "%E",
+                str(pin),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self._reader = threading.Thread(
+            target=self._read_edges,
+            name="aiy-button-edge-monitor",
+            daemon=True,
+        )
+        self._reader.start()
+
+    def _read_edges(self) -> None:
+        assert self._proc.stdout is not None
+        for line in self._proc.stdout:
+            edge = line.strip().lower()
+            if edge == "falling":
+                # The AIY button is active-low: falling means pressed.
+                self._events.put(ButtonEdge(True, time.monotonic()))
+            elif edge == "rising":
+                self._events.put(ButtonEdge(False, time.monotonic()))
+
+        return_code = self._proc.poll()
+        if not self._closed:
+            error = ""
+            if self._proc.stderr is not None and return_code is not None:
+                error = self._proc.stderr.read().strip()
+            detail = f"gpiomon exited unexpectedly (status {return_code})"
+            if error:
+                detail += f": {error}"
+            self._events.put(RuntimeError(detail))
+
+    def next_edge(self) -> ButtonEdge | None:
+        try:
+            event = self._events.get_nowait()
+        except queue.Empty:
+            return None
+        if isinstance(event, RuntimeError):
+            raise event
+        return event
+
+    def close(self) -> None:
+        self._closed = True
+        if self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait(timeout=1)
 
 
 def await_recorder_exit(proc: subprocess.Popen | None) -> None:
@@ -929,7 +1006,8 @@ def main() -> int:
     if BUTTON_TRACE:
         print(
             "- Button trace: enabled "
-            f"(poll={POLL_SEC * 1000:.0f}ms, debounce={BUTTON_DEBOUNCE_SEC * 1000:.0f}ms)"
+            f"(gpiomon edges, kernel debounce={BUTTON_DEBOUNCE_PERIOD}, "
+            f"state tick={POLL_SEC * 1000:.0f}ms)"
         )
 
     def clear_finished_voice_loop() -> None:
@@ -974,8 +1052,7 @@ def main() -> int:
             return
         print(
             "[button-trace] "
-            f"{event}; rec={recording} raw={'down' if raw_pressed else 'up'} "
-            f"finalizing={recording_finalizing} "
+            f"{event}; rec={recording} finalizing={recording_finalizing} "
             f"stable={'down' if last_pressed else 'up'} "
             f"player={player_kind or '-'} net={network_pending} "
             f"reply={tts_reply_path is not None} warned={warned} "
@@ -1161,14 +1238,16 @@ def main() -> int:
         if player is not None:
             player_kind = "volume"
 
+    button_monitor = None
     try:
         led.set(False)
-        # Button reads come directly from the GPIO line.  Keep only a state
-        # that has been stable briefly so contact bounce cannot turn one
-        # physical press into several logical presses/releases.
+        # Read the startup state once, then let one persistent gpiomon process
+        # own the line.  Kernel edge events are queued, so a complete short
+        # press cannot disappear between slow userspace polling samples.
         last_pressed = read_button_pressed(GPIO_CHIP, BUTTON_PIN)
-        raw_pressed = last_pressed
-        raw_pressed_changed_at = time.monotonic()
+        button_monitor = ButtonEdgeMonitor(
+            GPIO_CHIP, BUTTON_PIN, BUTTON_DEBOUNCE_PERIOD
+        )
 
         while True:
             now = time.monotonic()
@@ -1291,34 +1370,20 @@ def main() -> int:
                     if not recording and not warned:
                         led.set(False)
 
-            gpio_read_started_at = time.monotonic()
-            sampled_pressed = read_button_pressed(GPIO_CHIP, BUTTON_PIN)
-            gpio_read_elapsed = time.monotonic() - gpio_read_started_at
-            if BUTTON_TRACE and gpio_read_elapsed >= max(POLL_SEC * 2, 0.05):
-                trace_button(f"slow GPIO read {gpio_read_elapsed * 1000:.1f}ms")
-            if sampled_pressed != raw_pressed:
-                raw_pressed = sampled_pressed
-                raw_pressed_changed_at = now
-                trace_button(
-                    "raw edge "
-                    f"{'down' if raw_pressed else 'up'} observed"
-                )
-
-            if (
-                raw_pressed != last_pressed
-                and now - raw_pressed_changed_at >= BUTTON_DEBOUNCE_SEC
-            ):
-                pressed = raw_pressed
-                trace_button(
-                    "stable edge "
-                    f"{'down' if pressed else 'up'} accepted "
-                    f"after {(now - raw_pressed_changed_at) * 1000:.1f}ms"
-                )
-            else:
+            button_edge = button_monitor.next_edge()
+            if button_edge is None:
                 pressed = last_pressed
+                button_now = now
+            else:
+                pressed = button_edge.pressed
+                button_now = button_edge.observed_at
+                trace_button(
+                    "kernel edge "
+                    f"{'down' if pressed else 'up'} received"
+                )
 
             if pressed and not last_pressed:
-                press_started_at = now
+                press_started_at = button_now
                 warned = False
                 shutdown_requested = False
                 secondary_hold_ready = False
@@ -1335,7 +1400,7 @@ def main() -> int:
                     trace_button("press edge deferred to release handler")
 
             elif pressed and press_started_at is not None:
-                held = now - press_started_at
+                held = button_now - press_started_at
                 if (
                     held >= SECONDARY_HOLD_MIN_SEC
                     and not secondary_hold_ready
@@ -1394,7 +1459,11 @@ def main() -> int:
                     return 0
 
             elif not pressed and last_pressed:
-                held = (now - press_started_at) if press_started_at is not None else 0.0
+                held = (
+                    (button_now - press_started_at)
+                    if press_started_at is not None
+                    else 0.0
+                )
                 trace_button(f"release handler entered; held={held:.3f}s")
 
                 if recording_stop_press_pending_release and not warned:
@@ -1418,7 +1487,7 @@ def main() -> int:
                 elif not warned and secondary_hold_ready:
                     trace_button("release routed to auxiliary hold")
                     secondary_hold_ready = False
-                    secondary_released_at = now
+                    secondary_released_at = button_now
                     secondary_confirmation_queued = False
                     if (
                         release_prompt_player is not None
@@ -1512,6 +1581,8 @@ def main() -> int:
         stop_player(release_prompt_player)
         delete_file(tts_reply_path)
         delete_file(tts_playback_path)
+        if button_monitor is not None:
+            button_monitor.close()
         assistant.close()
         led.close()
 
