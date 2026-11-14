@@ -56,6 +56,12 @@ from opencode_voice import OpenCodeVoiceAssistant
 PROJECT_DIR = Path(__file__).resolve().parent
 POLL_SEC = float(os.getenv("AIY_BUTTON_POLL_SEC", "0.02"))
 BUTTON_DEBOUNCE_SEC = float(os.getenv("AIY_BUTTON_DEBOUNCE_SEC", "0.04"))
+BUTTON_TRACE = os.getenv("AIY_BUTTON_TRACE", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 ECHO_LED_FLASH_SEC = float(os.getenv("AIY_ECHO_LED_FLASH_SEC", "0.25"))
 MAX_RECORDING_SEC = float(os.getenv("AIY_MAX_RECORDING_SEC", "45"))
 SECONDARY_HOLD_MIN_SEC = float(os.getenv("AIY_SECONDARY_HOLD_MIN_SEC", "1.5"))
@@ -853,6 +859,11 @@ def main() -> int:
         f"- Current auxiliary volume: {output_volume_profile} "
         f"({OUTPUT_VOLUME_GAINS[output_volume_profile]:.2f}x)"
     )
+    if BUTTON_TRACE:
+        print(
+            "- Button trace: enabled "
+            f"(poll={POLL_SEC * 1000:.0f}ms, debounce={BUTTON_DEBOUNCE_SEC * 1000:.0f}ms)"
+        )
 
     def clear_finished_voice_loop() -> None:
         delete_file(WAV_PATH)
@@ -888,6 +899,19 @@ def main() -> int:
             or network_pending
             or tts_reply_path is not None
             or network_error is not None
+        )
+
+    def trace_button(event: str) -> None:
+        """Emit edge/state diagnostics without changing button decisions."""
+        if not BUTTON_TRACE:
+            return
+        print(
+            "[button-trace] "
+            f"{event}; rec={recording} raw={'down' if raw_pressed else 'up'} "
+            f"stable={'down' if last_pressed else 'up'} "
+            f"player={player_kind or '-'} net={network_pending} "
+            f"reply={tts_reply_path is not None} warned={warned} "
+            f"stop-release-pending={recording_stop_press_pending_release}"
         )
 
     def cancel_voice_turn() -> None:
@@ -1157,16 +1181,29 @@ def main() -> int:
                     if not recording and not warned:
                         led.set(False)
 
+            gpio_read_started_at = time.monotonic()
             sampled_pressed = read_button_pressed(GPIO_CHIP, BUTTON_PIN)
+            gpio_read_elapsed = time.monotonic() - gpio_read_started_at
+            if BUTTON_TRACE and gpio_read_elapsed >= max(POLL_SEC * 2, 0.05):
+                trace_button(f"slow GPIO read {gpio_read_elapsed * 1000:.1f}ms")
             if sampled_pressed != raw_pressed:
                 raw_pressed = sampled_pressed
                 raw_pressed_changed_at = now
+                trace_button(
+                    "raw edge "
+                    f"{'down' if raw_pressed else 'up'} observed"
+                )
 
             if (
                 raw_pressed != last_pressed
                 and now - raw_pressed_changed_at >= BUTTON_DEBOUNCE_SEC
             ):
                 pressed = raw_pressed
+                trace_button(
+                    "stable edge "
+                    f"{'down' if pressed else 'up'} accepted "
+                    f"after {(now - raw_pressed_changed_at) * 1000:.1f}ms"
+                )
             else:
                 pressed = last_pressed
 
@@ -1175,13 +1212,17 @@ def main() -> int:
                 warned = False
                 shutdown_requested = False
                 secondary_hold_ready = False
+                trace_button("press handler entered")
                 # Stopping on the press edge, rather than waiting for its
                 # release, makes the record/stop gesture responsive.  The
                 # matching release is consumed below so it cannot immediately
                 # cancel the Echo/voice turn that this stop starts.
                 if recording:
                     recording_stop_press_pending_release = True
+                    trace_button("recording: stop requested on press edge")
                     finish_recording("button press")
+                else:
+                    trace_button("press edge deferred to release handler")
 
             elif pressed and press_started_at is not None:
                 held = now - press_started_at
@@ -1242,11 +1283,14 @@ def main() -> int:
 
             elif not pressed and last_pressed:
                 held = (now - press_started_at) if press_started_at is not None else 0.0
+                trace_button(f"release handler entered; held={held:.3f}s")
 
                 if recording_stop_press_pending_release and not warned:
+                    trace_button("release consumed after recording stop")
                     print("[button] recording stop press released")
 
                 elif secondary_pending:
+                    trace_button("release routed to auxiliary confirmation")
                     if (
                         held <= SHORT_PRESS_MAX_SEC
                         and press_started_at is not None
@@ -1260,6 +1304,7 @@ def main() -> int:
                         print("[button] auxiliary gesture confirmation ignored")
 
                 elif not warned and secondary_hold_ready:
+                    trace_button("release routed to auxiliary hold")
                     secondary_hold_ready = False
                     secondary_released_at = now
                     secondary_confirmation_queued = False
@@ -1277,6 +1322,7 @@ def main() -> int:
                         start_secondary_wait()
 
                 elif secondary_release_pending:
+                    trace_button("release routed to queued auxiliary confirmation")
                     if (
                         held <= SHORT_PRESS_MAX_SEC
                         and press_started_at is not None
@@ -1290,10 +1336,13 @@ def main() -> int:
 
                 elif held <= SHORT_PRESS_MAX_SEC and not warned:
                     if not recording and voice_turn_is_active():
+                        trace_button("short release cancels active voice turn")
                         cancel_voice_turn()
                     elif player is not None:
+                        trace_button("short release ignored: volume announcement active")
                         print("[button] short press ignored while volume announcement is active")
                     elif not recording:
+                        trace_button("short release starts recording")
                         delete_file(WAV_PATH)
                         delete_file(PLAY_WAV_PATH)
                         print("[rec] start")
@@ -1318,14 +1367,17 @@ def main() -> int:
                         recording_started_at = time.monotonic()
                         assistant.prewarm()
                     else:
+                        trace_button("release fallback stops recording")
                         finish_recording("button")
 
                 elif warned and held < SHUTDOWN_SEC:
+                    trace_button("release cancels pending shutdown")
                     print("[cancel] shutdown cancelled")
                     cancel_pattern(OUTPUT_VOLUME_GAINS[output_volume_profile])
                     led.set(False)
 
                 elif not recording and not player:
+                    trace_button("release leaves daemon in standby")
                     led.set(False)
 
                 press_started_at = None
