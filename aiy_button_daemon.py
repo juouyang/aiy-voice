@@ -165,6 +165,71 @@ class VoiceLoopResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class RecordingFinalizeResult:
+    channel: str | None = None
+    peak_pct: float = 0.0
+    auto_gain: float = 0.0
+    valid_audio: bool = False
+    recorder_wait_ms: int = 0
+    processing_ms: int = 0
+    error: str | None = None
+
+
+def await_recorder_exit(proc: subprocess.Popen | None) -> None:
+    """Reap an arecord process after its non-blocking stop request."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=1)
+
+
+def finalize_recording_audio(
+    proc: subprocess.Popen | None,
+    output_gain: float,
+    finalize_results: queue.Queue[RecordingFinalizeResult],
+) -> None:
+    """Wait for arecord and prepare Echo audio away from the button loop."""
+    try:
+        wait_started_at = time.monotonic()
+        await_recorder_exit(proc)
+        recorder_wait_ms = round((time.monotonic() - wait_started_at) * 1000)
+        # arecord has closed the capture stream, so the stop cue cannot leak
+        # into the user's recording.  WAV processing continues in this worker.
+        beep_stop(output_gain)
+        if not WAV_PATH.exists() or WAV_PATH.stat().st_size <= 44:
+            finalize_results.put(
+                RecordingFinalizeResult(recorder_wait_ms=recorder_wait_ms)
+            )
+            return
+        processing_started_at = time.monotonic()
+        channel, peak_pct, auto_gain = process_for_playback(
+            WAV_PATH,
+            PLAY_WAV_PATH,
+            output_gain,
+        )
+        processing_ms = round((time.monotonic() - processing_started_at) * 1000)
+        finalize_results.put(
+            RecordingFinalizeResult(
+                channel=channel,
+                peak_pct=peak_pct,
+                auto_gain=auto_gain,
+                valid_audio=True,
+                recorder_wait_ms=recorder_wait_ms,
+                processing_ms=processing_ms,
+            )
+        )
+    except Exception as exc:
+        finalize_results.put(RecordingFinalizeResult(error=str(exc)))
+
+
 def secondary_prompt_pattern(output_gain: float = 1.0) -> None:
     """Signal that one short press may confirm the auxiliary gesture."""
     play_tone(660, 0.07, output_gain)
@@ -826,6 +891,7 @@ def main() -> int:
         raise RuntimeError(config_error)
     assistant = create_voice_assistant()
     recorder = None
+    recording_finalizing = False
     player = None
     player_kind = None
     tts_playback_path = None
@@ -839,6 +905,7 @@ def main() -> int:
     led_on = False
     next_led_toggle_at = None
     results: queue.Queue[VoiceLoopResult] = queue.Queue()
+    finalize_results: queue.Queue[RecordingFinalizeResult] = queue.Queue()
     job_id = 0
     network_pending = False
     tts_reply_path = None
@@ -908,6 +975,7 @@ def main() -> int:
         print(
             "[button-trace] "
             f"{event}; rec={recording} raw={'down' if raw_pressed else 'up'} "
+            f"finalizing={recording_finalizing} "
             f"stable={'down' if last_pressed else 'up'} "
             f"player={player_kind or '-'} net={network_pending} "
             f"reply={tts_reply_path is not None} warned={warned} "
@@ -996,55 +1064,88 @@ def main() -> int:
                 assistant.discard_unheard_turn()
 
     def finish_recording(reason: str) -> None:
-        """Stop recording and start the normal Echo/ASR/TTS sequence."""
-        nonlocal recorder, recording, recording_started_at
-        nonlocal job_id, network_pending, network_error, player, player_kind
+        """Stop capture immediately and finalize its WAV off the button loop."""
+        nonlocal recorder, recording, recording_started_at, recording_finalizing
         if not recording:
             return
 
         print(f"[rec] stop ({reason})")
-        stop_recorder(recorder)
+        stopped_recorder = recorder
+        if stopped_recorder is not None and stopped_recorder.poll() is None:
+            try:
+                stopped_recorder.send_signal(signal.SIGINT)
+            except ProcessLookupError:
+                pass
         recorder = None
         recording = False
         recording_started_at = None
-        beep_stop(OUTPUT_VOLUME_GAINS[output_volume_profile])
-
-        if WAV_PATH.exists() and WAV_PATH.stat().st_size > 44:
-            channel, peak_pct, auto = process_for_playback(
-                WAV_PATH,
-                PLAY_WAV_PATH,
-                OUTPUT_VOLUME_GAINS[output_volume_profile],
-            )
-            print(
-                f"[proc] channel={channel} input_peak={peak_pct * 100:.2f}% auto_gain={auto:.2f}x"
-            )
-            job_id += 1
-            network_pending = True
-            network_error = None
-            # Start local playback before copying the WAV for the network
-            # worker, so Echo stays immediate.
-            player = start_echo_playback(play_dev, PLAY_WAV_PATH)
-            if player is not None:
-                player_kind = "recording"
-            else:
-                print("[warn] original playback could not start")
-            try:
-                start_voice_loop(
-                    job_id,
-                    PLAY_WAV_PATH,
-                    assistant,
-                    results,
+        recording_finalizing = True
+        try:
+            threading.Thread(
+                target=finalize_recording_audio,
+                args=(
+                    stopped_recorder,
+                    OUTPUT_VOLUME_GAINS[output_volume_profile],
+                    finalize_results,
+                ),
+                name="aiy-recording-finalize",
+                daemon=True,
+            ).start()
+        except RuntimeError as exc:
+            recording_finalizing = False
+            stop_recorder(stopped_recorder)
+            finalize_results.put(
+                RecordingFinalizeResult(
+                    error=f"could not start recording finalizer: {exc}"
                 )
-                print("[voice] ASR and TTS request started")
-            except OSError as exc:
-                network_pending = False
-                network_error = f"could not start voice request: {exc}"
-                assistant.discard_unheard_turn()
-                print(f"[voice] request failed: {network_error}")
-        else:
+            )
+
+    def accept_finalized_recording(result: RecordingFinalizeResult) -> None:
+        """Start Echo and the voice request after background WAV preparation."""
+        nonlocal recording_finalizing, job_id, network_pending, network_error
+        nonlocal player, player_kind
+        recording_finalizing = False
+        if result.error:
+            network_error = f"could not finalize recording: {result.error}"
+            assistant.discard_unheard_turn()
+            print(f"[voice] request failed: {network_error}")
+            return
+        if not result.valid_audio:
+            print(f"[rec] finalized (arecord wait={result.recorder_wait_ms}ms)")
             print("[warn] no valid audio recorded")
             assistant.discard_unheard_turn()
             led.set(False)
+            return
+
+        print(
+            f"[proc] arecord_wait={result.recorder_wait_ms}ms "
+            f"processing={result.processing_ms}ms channel={result.channel} "
+            f"input_peak={result.peak_pct * 100:.2f}% "
+            f"auto_gain={result.auto_gain:.2f}x"
+        )
+        job_id += 1
+        network_pending = True
+        network_error = None
+        # Start local playback before copying the WAV for the network worker,
+        # so Echo stays immediate once finalization completes.
+        player = start_echo_playback(play_dev, PLAY_WAV_PATH)
+        if player is not None:
+            player_kind = "recording"
+        else:
+            print("[warn] original playback could not start")
+        try:
+            start_voice_loop(
+                job_id,
+                PLAY_WAV_PATH,
+                assistant,
+                results,
+            )
+            print("[voice] ASR and TTS request started")
+        except OSError as exc:
+            network_pending = False
+            network_error = f"could not start voice request: {exc}"
+            assistant.discard_unheard_turn()
+            print(f"[voice] request failed: {network_error}")
 
     def trigger_auxiliary_volume() -> None:
         nonlocal output_volume_profile, player, player_kind
@@ -1072,6 +1173,13 @@ def main() -> int:
         while True:
             now = time.monotonic()
             expire_conversation_memory(now)
+
+            while True:
+                try:
+                    finalized = finalize_results.get_nowait()
+                except queue.Empty:
+                    break
+                accept_finalized_recording(finalized)
 
             while True:
                 try:
@@ -1166,7 +1274,9 @@ def main() -> int:
                     led_on = True
                     led.set(led_on)
             else:
-                blinking = bool(player or network_pending or tts_reply_path)
+                blinking = bool(
+                    recording_finalizing or player or network_pending or tts_reply_path
+                )
                 if blinking:
                     if next_led_toggle_at is None:
                         led_on = True
@@ -1231,8 +1341,10 @@ def main() -> int:
                     and not secondary_hold_ready
                     and not secondary_pending
                     and not secondary_release_pending
+                    and not recording_stop_press_pending_release
                     and not warned
                     and not recording
+                    and not recording_finalizing
                     and player is None
                     and not network_pending
                     and tts_reply_path is None
@@ -1335,7 +1447,10 @@ def main() -> int:
                         print("[button] auxiliary gesture confirmation ignored")
 
                 elif held <= SHORT_PRESS_MAX_SEC and not warned:
-                    if not recording and voice_turn_is_active():
+                    if recording_finalizing:
+                        trace_button("short release ignored: recording finalizing")
+                        print("[button] short press ignored while recording is finalizing")
+                    elif not recording and voice_turn_is_active():
                         trace_button("short release cancels active voice turn")
                         cancel_voice_turn()
                     elif player is not None:
